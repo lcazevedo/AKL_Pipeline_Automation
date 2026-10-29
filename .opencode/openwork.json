@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "workspace": {
+    "name": "Openwork_AKL",
+    "preset": "starter"
+  },
+  "authorizedRoots": [
+    "."
+  ],
+  "reload": null,
+  "instructions": [
+    "AGENTS.md"
+  ]
+}

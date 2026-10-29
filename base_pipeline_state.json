@@ -1,0 +1,239 @@
+{
+  "_schema_version": "1.0",
+  "_description": "AKL pipeline execution state. Managed automatically by skills. Do not edit manually except for the 'current_step' field to force the re-execution of a step.",
+
+  "project": {
+    "name": "",
+    "created_at": "",
+    "last_updated": "",
+    "workspace_path": "",
+    "config_file": "pipeline_config.yaml",
+    "project_config_file": "project_config.md"
+  },
+
+  "current_step": 0,
+
+  "steps": {
+    "1": {
+      "name": "Bibliographic data acquisition",
+      "status": "pending",
+      "source": "",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "raw_data_file": "",
+        "raw_data_file_csv": ""
+      },
+      "params_used": {
+        "source_type": "",
+        "openalex_query": "",
+        "upload_filename": "",
+        "records_raw": 0,
+        "records_output": 0,
+        "records_missing_abstract": 0
+      },
+      "notes": ""
+    },
+
+    "2": {
+      "name": "Data cleaning and structuring",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "corpus_file": "",
+        "quality_report_file": "",
+        "corpus_file_csv": ""
+      },
+      "params_used": {
+        "source_format": "",
+        "fields_mapped": [],
+        "records_raw": 0,
+        "records_after_dedup": 0,
+        "records_missing_abstract": 0,
+        "input_file": "",
+        "records_input": 0,
+        "records_output": 0,
+        "removed_missing_mandatory": 0,
+        "removed_abstract_quality": 0,
+        "removed_duplicates": 0,
+        "removed_missing_extra": 0,
+        "extra_fields_checked": [
+
+        ]        
+      },
+      "notes": ""
+    },
+
+    "3": {
+      "name": "Initial topic modeling (BERTopic)",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "topics_file": "",
+        "model_file": "",
+        "embeddings_file": "",
+        "corpus_with_topics": ""
+      },
+      "params_used": {
+        "embedding_model": "",
+        "embedding_prompt": "",
+        "min_topic_size": 0,
+        "nr_topics": "",
+        "n_topics_found": 0,
+        "input_file": "",
+        "n_records": 0,
+        "n_layers_found": 0,
+        "best_layer": 0,
+        "n_topics_best_layer": 0        
+      },
+      "notes": ""
+    },
+
+    "4": {
+      "name": "Specialized curation and sampling",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "review_file": "",
+        "curation_reference_file": ""
+      },
+      "params_used": {
+        "sample_size": 0,
+        "relevant_count": 0,
+        "not_relevant_count": 0,
+        "llm_model_used": "",
+        "suggested_yes": 0,
+        "suggested_no": 0        
+      },
+      "validation": {
+        "status": "pending",
+        "suggested_at": "",
+        "validated_at": "",
+        "corrections_made": false
+      },
+      "notes": ""
+    },
+
+    "5": {
+      "name": "Corpus filtering model (SetFit)",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "corpus_filtered_file": "",
+        "model_file": "",
+        "confusion_matrix_file": "",
+        "setfit_report_file": "",
+        "corpus_relevant_pkl": "",
+        "corpus_not_relevant_pkl": "",
+        "corpus_relevant_xlsx": "",
+        "corpus_not_relevant_xlsx": ""
+      },
+      "params_used": {
+        "setfit_base_model": "",
+        "num_epochs": 0,
+        "batch_size": 0,
+        "accuracy": 0.0,
+        "records_before": 0,
+        "records_after": 0,
+        "f1_score": 0,
+        "records_discarded": 0
+      },
+      "notes": ""
+    },
+
+    "6": {
+      "name": "High-fidelity topic mapping (EVOC)",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "topics_final_file": "",
+        "model_file": "",
+        "cvi_report_file": "",
+        "kneedle_plot_file": "",
+        "cluster_maps_folder": ""
+      },
+      "params_used": {
+        "embedding_model": "",
+        "min_cluster_size": 0,
+        "metric": "",
+        "n_topics_found": 0,
+        "cvi_alpha": 0.0
+      },
+      "validation": {
+        "status": "pending",
+        "consensus_reached": false,
+        "suggested_layers": {},
+        "validated_at": ""
+      },
+      "notes": ""
+    },
+
+    "7": {
+      "name": "Semantic enrichment (LLM and clustering)",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "enriched_corpus_file": "",
+        "extraction_files": {}
+      },
+      "params_used": {
+        "llm_model": "",
+        "vllm_base_url": "",
+        "chunk_unit": "",
+        "vectors_extracted": [],
+        "batch_size": 0,
+        "records_processed": 0,
+        "checkpoint_last": ""
+      },
+      "notes": ""
+    },
+
+    "8": {
+      "name": "Specialized study and synthesis",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "insights_file": "",
+        "knowledge_gaps_file": "",
+        "visualizations_requested_file": ""
+      },
+      "params_used": {
+        "llm_model_used": "",
+        "n_insights_suggested": 0,
+        "n_insights_validated": 0
+      },
+      "validation": {
+        "status": "pending",
+        "suggested_at": "",
+        "validated_at": "",
+        "corrections_made": false
+      },
+      "notes": ""
+    },
+
+    "9": {
+      "name": "Communication and final presentation",
+      "status": "pending",
+      "started_at": "",
+      "completed_at": "",
+      "output": {
+        "report_file": "",
+        "figures_folder": "",
+        "knowledge_landscape_file": ""
+      },
+      "params_used": {
+        "figures_format": "",
+        "figures_dpi": 0,
+        "visualizations_generated": []
+      },
+      "notes": ""
+    }
+  }
+}
