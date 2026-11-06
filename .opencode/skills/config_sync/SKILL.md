@@ -1,4 +1,3 @@
-
 ---
 name: config_sync
 description: Synchronizes natural-language configuration overrides from Section 11 of project_config.md into pipeline_config.yaml. Run this skill at the start of every session, before any pipeline step, to apply the specialist's requested adjustments (e.g., "audit 100 challenge sentences", "use the gemma-3-4b model via vLLM", "increase batch_size to 32"). Only modifies keys that already exist in pipeline_config.yaml; ambiguous requests are confirmed with the specialist before applying.
@@ -42,7 +41,7 @@ Use this reference of the main editable keys (always verify against the actual f
 |---|---|---|
 | `models.embedding` | Embedding model name | "use model X for embeddings" |
 | `models.llm_extraction` | LLM used for semantic extraction (vLLM) | "use model X via vLLM", "switch extraction model" |
-| `models.llm_agent` | Name of the model that acts as the agent (naming topics, pre-labeling, synthesis). Ask the user which model is selected in OpenWork when the project is created, and record it here exactly as shown | "the agent model is X" |
+| `models.llm_agent` | LLM used by the orchestrator/breakpoints | "use model X for the agent" |
 | `models.setfit_base` | Base model for SetFit (Step 5) | "use model X for SetFit" |
 | `step1_openalex.filters` | OpenAlex query filters (Step 1) | "restrict OpenAlex to 2020+", "add filter X" |
 | `step2_cleaning.detect_language` | Auto-detect language (Step 2) | "enable/disable language detection" |
@@ -53,8 +52,6 @@ Use this reference of the main editable keys (always verify against the actual f
 | `step3_bertopic.embedding_device` | CPU vs CUDA for embeddings (Step 3) | "use CPU for embeddings" |
 | `step3_bertopic.min_df` | CountVectorizer min_df (Step 3) | "min_df 1" |
 | `step3_bertopic.llm_nr_docs` | Docs per topic sent to LLM (Step 3) | "send 3 docs per topic to the LLM" |
-| `reproducibility.seed` | Global random seed used by Steps 3-7 | "use seed 123", "change the random seed" |
-| `step3_bertopic.max_layers` / `min_similarity_threshold` | Number/merging of topic-granularity layers (Step 3) | "fewer granularity layers" |
 | `step5_setfit.num_epochs` | SetFit epochs (Step 5) | "train for 3 epochs" |
 | `step5_setfit.min_samples_per_class` | Min samples per class warning (Step 5) | "warn below 10 samples per class" |
 | `step5_setfit.batch_size` | SetFit batch size (Step 5) | "batch size 8" |
@@ -64,7 +61,6 @@ Use this reference of the main editable keys (always verify against the actual f
 | `step6_evoc.min_cluster_size` | EVoC min cluster size (Step 6) | "min cluster size 3" |
 | `step6_evoc.metric` | EVoC distance metric (Step 6) | "use euclidean metric" |
 | `step6_evoc.min_df` | EVoC min_df (Step 6) | "min_df 1" |
-| `step6_evoc.max_layers` / `min_similarity_threshold` | Number/merging of topic-granularity layers (Step 6) | "fewer granularity layers" |
 | `step7_extraction.chunk_unit` | Sentence vs abstract extraction (Step 7) | "extract per abstract", "sentence level" |
 | `step7_extraction.vectors` | Semantic vectors list (Step 7) | "add vector X", "remove controversies" |
 | `step7_vllm.base_url` | vLLM server URL (Step 7) | "point to localhost", "use PC1 server" |
@@ -82,8 +78,6 @@ Use this reference of the main editable keys (always verify against the actual f
 | `audits.<name>.predicted_col` | Column holding the predicted label (Step 8) | "audit macro categories instead of micro labels" |
 | `audits.<name>.columns` | Columns exported to the review file (Step 8) | "include title and abstract in the boundary audit" |
 | `audits.<name>.source` | Data source for an audit (Step 8) | "sample from the full predictions table" |
-
-If the specialist changes the seed, a model, the embedding device or the temperature after some steps have already run, tell them those steps must be rerun for the change to apply.
 
 Future sections (e.g., additional `audits.*` entries) will be added to this table as they are introduced into `pipeline_config.yaml`. Always re-read the file to discover new keys.
 
@@ -157,5 +151,3 @@ Note: changes take effect the next time the affected step runs.
 
 - At the **start of every session**, before any pipeline step (the `status` skill references this skill).
 - Whenever the specialist says something like "change the config", "use model X", "audit N items", or edits Section 11 mid-session.
-
-

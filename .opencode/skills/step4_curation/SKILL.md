@@ -30,7 +30,7 @@ Run the worker in suggest mode (Note: ensure vLLM is running):
 cd <workspace_root>
 ./run_worker.sh workers/step4_worker.py suggest
 ```
-Once it finishes, tell the user the file is ready at `data/03_review/step4_relevance_review.xlsx`. Explain that they must open it, review the "Relevance (yes/no)" column, correct any AI mistakes, and save. Tell them to keep this file: it is the record of their decisions and must not be regenerated after validation. Instruct them to reply with "validated" or "done" when finished.
+Once it finishes, tell the user the file is ready at `data/03_review/step4_relevance_review.xlsx`. Explain that they must open it, review the "Relevance (yes/no)" column, correct any AI mistakes, and save. Instruct them to reply with "validated" or "done" when finished.
 
 ### User answers "manual"
 Run the worker in manual mode:

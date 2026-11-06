@@ -28,11 +28,6 @@ import re
 import sys
 import warnings
 from datetime import datetime
-
-try:
-    from workers.reference_date import reference_year as _reference_year
-except ImportError:  # executed from inside workers/
-    from reference_date import reference_year as _reference_year
 from pathlib import Path
 from typing import Optional
 
@@ -293,6 +288,20 @@ class Step1Worker:
             pyalex = _require("pyalex")
             if email:
                 pyalex.config.email = email
+
+            # OpenAlex requires an API key for cursor paging. Read it from the
+            # environment, or from a `.env` file in the workspace (only this variable).
+            api_key = os.environ.get("OPENALEX_API_KEY", "")
+            env_file = self.state_path.resolve().parent / ".env"
+            if not api_key and env_file.exists():
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    k, _, v = line.partition("=")
+                    if k.strip() == "OPENALEX_API_KEY":
+                        api_key = v.strip().strip('"').strip("'")
+            if api_key:
+                pyalex.config.api_key = api_key
+            else:
+                self.logger.warning("OPENALEX_API_KEY not set — OpenAlex cursor paging will fail.")
 
             records = self._fetch_openalex(pyalex, query, max_results)
             self.logger.info(f"Fetched {len(records)} records from OpenAlex.")
@@ -1057,16 +1066,19 @@ class Step1Worker:
 
         # WOS .txt exports are tab-separated; may have a BOM or a "FN Clarivate" header
         if path.suffix.lower() == ".txt":
+            # index_col=False: WOS data rows end with a trailing tab, so they have one
+            # more field than the header; without it pandas would use the first column
+            # as the index and shift every column by one.
             try:
                 df = pd.read_csv(path, sep="\t", encoding="utf-8-sig", skiprows=0,
-                                 on_bad_lines="skip", low_memory=False)
+                                 on_bad_lines="skip", low_memory=False, index_col=False)
                 # If first column still looks like a WOS file-header line, skip it
                 if str(df.columns[0]).startswith("FN "):
                     df = pd.read_csv(path, sep="\t", encoding="utf-8-sig", skiprows=1,
-                                     on_bad_lines="skip", low_memory=False)
+                                     on_bad_lines="skip", low_memory=False, index_col=False)
             except Exception:
                 df = pd.read_csv(path, sep="\t", encoding="latin-1", skiprows=1,
-                                 on_bad_lines="skip", low_memory=False)
+                                 on_bad_lines="skip", low_memory=False, index_col=False)
         else:
             df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
 
@@ -1162,10 +1174,16 @@ class Step1Worker:
             out["publication_date"] = ""
 
         # Ensure citations come from the correct column and are integers
-        if "Total Times Cited Count" in df.columns:
-            out["citation_count"] = pd.to_numeric(df["Total Times Cited Count"], errors="coerce").fillna(0).astype(int)
+        # Z9 (all databases) when present; reduced exports only carry TC (Core Collection)
+        cite_col = next((c for c in ["Total Times Cited Count",
+                                     "WOS Core Collection Times Cited Count"]
+                         if c in df.columns and df[c].notna().any()), None)
+        if cite_col:
+            if cite_col != "Total Times Cited Count":
+                self.logger.info(f"Using '{cite_col}' for citation_count (Total Times Cited Count unavailable).")
+            out["citation_count"] = pd.to_numeric(df[cite_col], errors="coerce").fillna(0).astype(int)
         else:
-            self.logger.warning("WOS column 'Total Times Cited Count' not found — 'citation_count' set to 0.")
+            self.logger.warning("No WOS citation column found — 'citation_count' set to 0.")
             out["citation_count"] = 0
 
         # Authors — split by semicolon
@@ -1402,7 +1420,7 @@ class Step1Worker:
 
     def _compute_derived_fields(self, df: pd.DataFrame, source: str) -> pd.DataFrame:
         """Compute fields that are always derived regardless of source."""
-        current_year = _reference_year(config=self.config)
+        current_year = datetime.now().year
 
         # Ensure document_type is Title Case uniformly (e.g., "Article", "Review")
         if "document_type" in df.columns:
@@ -1449,9 +1467,7 @@ class Step1Worker:
             def _cpy(row):
                 try:
                     count = float(row["citation_count"] or 0)
-                    # Same definition as Steps 8 and 9: age counted inclusively
-                    # (a document published in the reference year has age 1).
-                    age = max(1, current_year - int(row["year"] or current_year) + 1)
+                    age = max(1, current_year - int(row["year"] or current_year))
                     return round(count / age, 2)
                 except Exception:
                     return 0.0

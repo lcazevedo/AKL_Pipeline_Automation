@@ -18,11 +18,6 @@ import logging
 import warnings
 from pathlib import Path
 from datetime import datetime
-
-try:
-    from workers.reference_date import reference_year as _reference_year
-except ImportError:  # executed from inside workers/
-    from reference_date import reference_year as _reference_year
 import pandas as pd
 import numpy as np
 
@@ -53,21 +48,10 @@ class Step8Worker:
         self.workspace = Path(self.state.get("project", {}).get("workspace_path", "."))
         self.logger = _setup_logger(self.workspace)
 
-    def _agent_llm(self):
-        """Name of the model acting as the agent (models.llm_agent in pipeline_config.yaml)."""
-        try:
-            import yaml
-            with open(self.workspace / "pipeline_config.yaml", "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            return (cfg.get("models", {}) or {}).get("llm_agent") or "not recorded"
-        except Exception:
-            return "not recorded"
-
     def _update_state(self, status):
         now = datetime.now().isoformat(timespec="seconds")
         step = self.state.setdefault("steps", {}).setdefault("8", {})
         step["status"] = status
-        step.setdefault("params", {})["synthesis_llm"] = self._agent_llm()
         if status == "running":
             step["started_at"] = now
             self.state["current_step"] = 8
@@ -127,7 +111,7 @@ class Step8Worker:
             return None
         
         df = df[df['year'].notnull()]
-        current_year = _reference_year(self.workspace)
+        current_year = datetime.now().year
         recent_years = [current_year, current_year-1, current_year-2]
         
         regimes = []
@@ -164,7 +148,7 @@ class Step8Worker:
         df_docs[if_col] = pd.to_numeric(df_docs[if_col], errors='coerce')
         df_docs = df_docs.dropna()
         
-        current_year = _reference_year(self.workspace)
+        current_year = datetime.now().year
         df_docs['age'] = current_year - df_docs['year'] + 1
         df_docs['cpy'] = df_docs[cit_col] / df_docs['age']
         
@@ -215,7 +199,7 @@ class Step8Worker:
 
     def crunch_data(self, df):
         md = ["# Step 8: Statistical Data Crunching Report\n"]
-        md.append("> This report contains computed scientometric matrices. The LLM agent will use this to generate the final qualitative synthesis.\n")
+        md.append("> This report contains computed cienciometric matrices. The LLM agent will use this to generate the final qualitative synthesis.\n")
 
         # 1. Thematic Lifecycle
         md.append("## 1. Thematic Lifecycle (Growth Regimes)")
@@ -285,7 +269,6 @@ class Step8Worker:
                 f.write(md_report)
                 
             self.logger.info(f"Data crunching completed. Report saved to {report_path}")
-            self.logger.info(f"Synthesis (agent) model recorded: {self._agent_llm()}")
             self._update_state("awaiting_agent_synthesis")
             
             return {

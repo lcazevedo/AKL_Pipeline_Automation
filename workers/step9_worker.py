@@ -18,11 +18,6 @@ import warnings
 import shutil
 from pathlib import Path
 from datetime import datetime
-
-try:
-    from workers.reference_date import reference_year as _reference_year
-except ImportError:  # executed from inside workers/
-    from reference_date import reference_year as _reference_year
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -51,6 +46,11 @@ class Step9Worker:
             
         self.workspace = Path(self.state.get("project", {}).get("workspace_path", "."))
         self.logger = _setup_logger(self.workspace)
+        try:
+            import yaml
+            self.config = yaml.safe_load(open(self.workspace / "pipeline_config.yaml", encoding="utf-8")) or {}
+        except Exception:
+            self.config = {}
         
         self.reports_dir = self.workspace / "data" / "04_reports"
         self.figures_dir = self.reports_dir / "figures"
@@ -58,8 +58,9 @@ class Step9Worker:
         (self.figures_dir / "ad_hoc").mkdir(exist_ok=True)
         
         # Plotting style
-        sns.set_theme(style="whitegrid", context="paper")
-        plt.rcParams.update({'figure.dpi': 300, 'savefig.bbox': 'tight'})
+        sns.set_theme(style="whitegrid", context="paper", font_scale=1.7)
+        plt.rcParams.update({'figure.dpi': 200, 'savefig.bbox': 'tight'})
+        # Figures carry no titles: the title and description go in the report caption (LaTeX style)
 
     def _update_state(self, status):
         now = datetime.now().isoformat(timespec="seconds")
@@ -77,6 +78,14 @@ class Step9Worker:
         for col in ('first_author_country', 'first_country', 'last_country', 'country'):
             if col in df.columns: return col
         return None
+
+    @staticmethod
+    def _pretty(label):
+        """Display fixes for auto-generated category labels (acronyms and small words)."""
+        return str(label).replace("Dft Or", "DFT or").replace(" Or ", " or ").replace(" And ", " and ")
+
+    def _last_year(self):
+        return int(self.config.get("step9_output", {}).get("last_complete_year", 2025))
 
     def load_data(self):
         ext_path = self.workspace / "data" / "02_intermediate" / "step7_extractions.pkl"
@@ -98,8 +107,15 @@ class Step9Worker:
             if topic_files:
                 try:
                     frames = []
-                    for sheet, d in pd.read_excel(topic_files[0], sheet_name=None).items():
-                        d['_topic'] = sheet
+                    sheets = pd.read_excel(topic_files[0], sheet_name=None)
+                    # Excel sheet names are cut at 31 characters; recover the full topic names
+                    full = {}
+                    if "Topics" in sheets and {"Topic", "New_Name"} <= set(sheets["Topics"].columns):
+                        full = {str(r.Topic): str(r.New_Name).split("_", 1)[-1] for r in sheets["Topics"].itertuples()}
+                    for sheet, d in sheets.items():
+                        if sheet in ("Topics", "All_Layers"):
+                            continue
+                        d['_topic'] = full.get(sheet.split("_", 1)[0], sheet.split("_", 1)[-1])
                         frames.append(d)
                     df_topics = pd.concat(frames, ignore_index=True)
                     if 'doi' in df_topics.columns and '_topic' in df_topics.columns:
@@ -112,8 +128,19 @@ class Step9Worker:
     def import_step6_map(self):
         source = self.workspace / "data" / "04_reports" / "topic_map.png"
         dest = self.figures_dir / "topic_map_2d.png"
+        if not source.exists():
+            # Step 6 writes one map per layer; use the layer selected in finalize
+            sel = list((self.workspace / "data" / "05_exports").glob("step6_topics_final_layer_*_selected.xlsx"))
+            if sel:
+                layer = sel[0].stem.split("layer_")[1].split("_")[0]
+                source = self.workspace / "data" / "04_reports" / "step6_cluster_maps" / f"step6_cluster_map_layer_{layer}.png"
         if source.exists():
-            shutil.copy(source, dest)
+            try:
+                from PIL import Image
+                im = Image.open(source)
+                im.crop((0, int(im.height * 0.055), im.width, im.height)).save(dest)   # drop the title band: titles live in the caption
+            except Exception:
+                shutil.copy(source, dest)
             self.logger.info("Step 6 Topographic 2D map imported successfully.")
 
     def plot_impact_likert(self, df):
@@ -132,7 +159,7 @@ class Step9Worker:
         df_docs[if_col] = pd.to_numeric(df_docs[if_col], errors='coerce')
         df_docs = df_docs.dropna()
         
-        current_year = _reference_year(getattr(self, 'workspace', '.'))
+        current_year = datetime.now().year
         df_docs['age'] = current_year - df_docs['year'] + 1
         df_docs['cpy'] = df_docs[cit_col] / df_docs['age']
         
@@ -160,9 +187,8 @@ class Step9Worker:
         plot_data = ct[["Long Tail", "Coattail", "Hidden Gem", "Star"]]
 
         colors = ["#b2182b", "#fd8d3c", "#4393c3", "#053061"]
-        ax = plot_data.plot(kind='barh', stacked=True, figsize=(10, 7), color=colors)
+        ax = plot_data.plot(kind='barh', stacked=True, figsize=(12, 8.5), color=colors, width=0.8)
         
-        plt.title("Distribution of Research Impact Categories by Country")
         plt.xlabel("Percentage of papers in each category (%)")
         plt.ylabel("")
         plt.legend(title="Impact Quadrant", bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -182,8 +208,9 @@ class Step9Worker:
                 df_geo = df_geo[df_geo['macro_category'].isin(top_cats)]
                 
                 ct_geo = pd.crosstab(df_geo[geo_col], df_geo['macro_category'], normalize='index')
+                ct_geo.columns = [self._pretty(c) for c in ct_geo.columns]
                 
-                sns.clustermap(ct_geo, method='ward', metric='euclidean', cmap='YlGnBu', figsize=(12, 10),
+                sns.clustermap(ct_geo, method='ward', metric='euclidean', cmap='YlGnBu', figsize=(16, 13),
                                cbar_kws={'label': 'Proportion of Research Effort'})
                 plt.savefig(self.figures_dir / "clustermap_countries.png", bbox_inches='tight')
                 plt.close()
@@ -200,8 +227,9 @@ class Step9Worker:
                 df_topic = df_topic[df_topic['macro_category'].isin(top_cats_t)]
                 
                 ct_topic = pd.crosstab(df_topic['_topic'], df_topic['macro_category'], normalize='index')
+                ct_topic.columns = [self._pretty(c) for c in ct_topic.columns]
                 
-                sns.clustermap(ct_topic, method='ward', metric='euclidean', cmap='YlGnBu', figsize=(14, 12),
+                sns.clustermap(ct_topic, method='ward', metric='euclidean', cmap='YlGnBu', figsize=(19, 16),
                                cbar_kws={'label': 'Proportion of Topic Effort'})
                 plt.savefig(self.figures_dir / "clustermap_topics.png", bbox_inches='tight')
                 plt.close()
@@ -212,12 +240,12 @@ class Step9Worker:
         if 'year' not in df.columns or 'macro_category' not in df.columns:
             return
             
-        df_y = df[df['year'].notnull()]
+        df_y = df[df['year'].notnull() & (df['year'] <= self._last_year())]   # 2026 is a partial year
         
         # Get top 9 categories to plot in a 3x3 grid
         top_cats = df_y['macro_category'].value_counts().head(9).index
         
-        fig, axes = plt.subplots(3, 3, figsize=(15, 12), sharex=True)
+        fig, axes = plt.subplots(3, 3, figsize=(20, 15), sharex=True)
         axes = axes.flatten()
         
         for i, cat in enumerate(top_cats):
@@ -225,11 +253,11 @@ class Step9Worker:
             yearly_counts = df_cat['year'].value_counts().sort_index()
             
             axes[i].plot(yearly_counts.index, yearly_counts.values, marker='o', color='#2b8cbe')
-            axes[i].set_title(cat[:40] + '...' if len(cat) > 40 else cat, fontsize=10)
+            axes[i].set_title(self._pretty(cat), fontsize=15)
+            axes[i].set_ylabel("Mentions")
             axes[i].tick_params(axis='x', rotation=45)
             axes[i].grid(True, linestyle='--', alpha=0.6)
             
-        plt.suptitle("Temporal Evolution of Top Research Themes", fontsize=16)
         plt.tight_layout()
         plt.savefig(self.figures_dir / "growth_curves.png", bbox_inches='tight')
         plt.close()

@@ -6,9 +6,7 @@ AKL Pipeline — Step 6: High-fidelity topic mapping (EVOC)
 Responsibilities:
 - Load corpus_filtered_relevant.pkl (output from Step 5).
 - Recompute/Load embeddings and run BERTopic + EVoC.
-- Evaluate each layer using Silhouette, Davies-Bouldin, CVI1 (Standard, sqrt), CVI2 (Adaptive alpha) and Kneedle.
-  Definitions follow the case-study scripts: Q = S_norm(min-max) * (1 - DB_norm(min-max)) feeds the Adaptive CVI
-  and Kneedle; the Standard CVI uses (S+1)/2. Reliability warnings are written to the report.
+- Evaluate each layer using Silhouette, Davies-Bouldin, CVI1 (sqrt), CVI2 (adaptive alpha), and Kneedle.
 - Generate cvi_report.md and kneedle_plot.png.
 - Generate 2D Cluster Maps (UMAP + datamapplot) for layers with < 50 topics.
 - Check for consensus among metrics.
@@ -21,8 +19,6 @@ import sys
 import json
 import logging
 import hashlib
-import os
-import random
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -36,10 +32,6 @@ from collections import Counter
 
 warnings.filterwarnings("ignore")
 np.bool = np.bool_  # Compatibility
-
-# EVoC keys that were removed from the configuration. They are ignored (with a
-# warning) so that old configuration files keep working unchanged.
-DEPRECATED_EVOC_KEYS = ("min_num_clusters", "next_cluster_size_quantile")
 
 def _require(package: str, install_name: str = None):
     import importlib
@@ -81,122 +73,8 @@ class Step6Worker:
         self.cfg_bertopic = self.config.get("step6_evoc", {})
         self.cfg_vllm = self.config.get("step7_vllm", {})
         self.cfg_models = self.config.get("models", {})
-        self.cfg_repro = self.config.get("reproducibility", {}) or {}
-
-        # Reproducibility: resolve the effective seed and warn on deprecated EVoC keys.
-        self.global_seed = self.cfg_repro.get("seed", 42)
-        self.seed = self._resolve_seed(self.cfg_bertopic.get("random_state"))
-        self._evoc_params = None
-        self._warn_deprecated_evoc_keys("step6_evoc", self.cfg_bertopic)
-        self.logger.info(f"Random seed: {self.seed}")
-
-    # ── Reproducibility helpers ───────────────────────────────────────────────
-
-    def _resolve_seed(self, value):
-        """Resolve a step-level seed. `None` inherits the global seed."""
-        if value is None:
-            value = self.global_seed
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 42
-
-    def _warn_deprecated_evoc_keys(self, section: str, cfg: dict) -> None:
-        """Warn if the config still carries EVoC keys removed from the pipeline."""
-        for key in DEPRECATED_EVOC_KEYS:
-            if key in cfg:
-                self.logger.warning(
-                    f"[{section}] configuration key '{key}' is deprecated and ignored; "
-                    "use 'max_layers' and/or 'min_similarity_threshold' instead."
-                )
-
-    def _seed_everything(self) -> None:
-        """Seed Python, NumPy and Torch right before a stochastic operation."""
-        os.environ.setdefault("PYTHONHASHSEED", str(self.seed))
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        try:
-            import torch
-            torch.manual_seed(self.seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self.seed)
-        except Exception:
-            pass
-
-    def _build_evoc_kwargs(self) -> dict:
-        """Build EVoC kwargs from config, guarding against unsupported arguments.
-
-        Only the parameters accepted by the installed EVoC version are passed.
-        If `random_state` is not supported, a clear warning is logged (without
-        trying to work around it) stating the run will not be reproducible.
-        """
-        import inspect
-        import evoc
-
-        kwargs = {"noise_level": self.cfg_bertopic.get("evoc_noise_level", 0.12)}
-        try:
-            params = inspect.signature(evoc.EVoC.__init__).parameters
-        except (TypeError, ValueError):
-            params = {}
-
-        if "random_state" in params:
-            kwargs["random_state"] = self.seed
-        else:
-            self.logger.warning(
-                "Installed EVoC version does not accept 'random_state': the clustering "
-                "will NOT be reproducible. Upgrade to evoc>=0.3.1 to enable deterministic runs."
-            )
-
-        for key in ("max_layers", "min_similarity_threshold"):
-            if key in self.cfg_bertopic and self.cfg_bertopic.get(key) is not None:
-                if key in params:
-                    kwargs[key] = self.cfg_bertopic[key]
-                else:
-                    self.logger.warning(
-                        f"Installed EVoC version does not accept '{key}': ignoring the configured value."
-                    )
-        return kwargs
-
-    def _collect_evoc_params(self, evoc_model) -> dict:
-        try:
-            return {k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
-                    for k, v in evoc_model.get_params().items()}
-        except Exception:
-            return {}
-
-    def _reproducibility_info(self) -> dict:
-        """Snapshot of the parameters/versions that affect reproducibility."""
-        from importlib.metadata import version as _pkg_version
-
-        def _ver(pkg: str) -> str:
-            try:
-                return _pkg_version(pkg)
-            except Exception:
-                return "unknown"
-
-        numba_threads = None
-        try:
-            import numba
-            numba_threads = int(numba.get_num_threads())
-        except Exception:
-            pass
-
-        device = self.cfg_bertopic.get("embedding_device", "cpu")
-        return {
-            "seed": self.seed,
-            "global_seed": self.global_seed,
-            "evoc_version": _ver("evoc"),
-            "numba_version": _ver("numba"),
-            "numba_num_threads_effective": numba_threads,
-            "numba_num_threads_env": os.environ.get("NUMBA_NUM_THREADS"),
-            "numpy_version": _ver("numpy"),
-            "scikit_learn_version": _ver("scikit-learn"),
-            "bertopic_version": _ver("bertopic"),
-            "sentence_transformers_version": _ver("sentence-transformers"),
-            "torch_version": _ver("torch"),
-            "embedding_device": device,
-            "evoc_params": self._evoc_params,
-        }
+        # Layers with more topics than this get metrics (CVI/Kneedle) but are NOT named by the LLM
+        self.max_topics_to_name = int(self.cfg_bertopic.get("max_topics_to_name", 100))
 
     def _update_state(self, status, output_dict=None, params=None, validation=None, notes=""):
         now = datetime.now().isoformat(timespec="seconds")
@@ -267,10 +145,9 @@ class Step6Worker:
             embedding_model, bertopic_model, representation_model = self._build_models()
             
             # 3. Embeddings
-            embeddings = self._get_embeddings(docs, embedding_model)
+            embeddings = self._get_embeddings(docs, embedding_model, dois=df["doi"])
             
-            # 4. Fit BERTopic (seeded right before the stochastic fit/clustering)
-            self._seed_everything()
+            # 4. Fit BERTopic
             self.logger.info("Fitting BERTopic + EVoC on relevant corpus...")
             topics, _ = bertopic_model.fit_transform(docs, embeddings=embeddings)
             
@@ -304,19 +181,15 @@ class Step6Worker:
                 # topics_ before the comparison). Call explicitly so the saved
                 # model is internally consistent with the selected layer.
                 bertopic_model._create_topic_vectors()
-            bertopic_model.save(str(model_dir), serialization="safetensors", save_ctfidf=True, save_embedding_model=embedding_model)
+            bertopic_model.save(str(model_dir), serialization="safetensors", save_ctfidf=True, save_embedding_model=self._embedding_to_save(embedding_model))
             
             # 9. State update
-            repro = self._reproducibility_info()
-            self.logger.info(f"Step 6 reproducibility: {repro}")
             if consensus_reached:
                 self.logger.info(f"Consensus reached! Automatically selecting Layer {best_layer_idx}.")
                 final_file = self.workspace / "data" / "05_exports" / f"step6_topics_final_layer_{best_layer_idx}_selected.xlsx"
                 self._update_state("completed", 
                     output_dict={"topics_final_file": str(final_file), "model_file": str(model_dir)},
-                    params={"best_layer": int(best_layer_idx), "naming_mode": self.naming_mode,
-                            "naming_llm": (self.cfg_models.get("llm_agent") or "not recorded") if self.naming_mode == "agent" else self.cfg_models.get("llm_extraction", ""),
-                            "reproducibility": repro},
+                    params={"best_layer": int(best_layer_idx), "naming_mode": self.naming_mode},
                     validation={"status": "completed", "consensus_reached": True, "suggested_layers": suggested_layers, "validated_at": datetime.now().isoformat()}
                 )
                 return {"status": "completed", "layer": best_layer_idx}
@@ -324,9 +197,7 @@ class Step6Worker:
                 self.logger.info("No consensus among CVIs. Awaiting human validation.")
                 self._update_state("awaiting_validation",
                     output_dict={"model_file": str(model_dir)},
-                    params={"best_layer": None, "naming_mode": self.naming_mode,
-                            "naming_llm": (self.cfg_models.get("llm_agent") or "not recorded") if self.naming_mode == "agent" else self.cfg_models.get("llm_extraction", ""),
-                            "reproducibility": repro},
+                    params={"best_layer": None, "naming_mode": self.naming_mode},
                     validation={"status": "awaiting_validation", "consensus_reached": False, "suggested_layers": suggested_layers}
                 )
                 return {"status": "awaiting_validation", "suggested": suggested_layers}
@@ -353,27 +224,24 @@ class Step6Worker:
         assignments_path = self.workspace / "data" / "checkpoints" / "step6_layer_assignments.pkl"
         if assignments_path.exists():
             assignments = pd.read_pickle(assignments_path)
-            if selected_layer < len(assignments):
+            if selected_layer in assignments:
                 self.logger.info(f"Re-aligning saved model to selected Layer {selected_layer}...")
                 input_file = self.workspace / "data" / "02_intermediate" / "step5_corpus_filtered_relevant.pkl"
                 df = pd.read_pickle(input_file)
                 docs = ("Title: " + df["title"].fillna("").astype(str) + "\n\nAbstract: " + df["abstract"].fillna("").astype(str)).tolist()
 
-                from sentence_transformers import SentenceTransformer
                 from bertopic import BERTopic
-                emb_name = self.cfg_models.get("embedding", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-                self._seed_everything()
-                embedding_model = SentenceTransformer(emb_name, device=self.cfg_bertopic.get("embedding_device", "cpu"))
+                embedding_model = self._load_embedding_model()
                 model_dir = self.workspace / "data" / "checkpoints" / "step6_bertopic_model"
                 bertopic_model = BERTopic.load(str(model_dir), embedding_model=embedding_model)
                 bertopic_model.update_topics(docs=docs, topics=assignments[selected_layer])
                 # BERTopic 0.17.4 bug: update_topics never recreates topic
                 # embeddings for custom assignments — call explicitly.
                 bertopic_model._create_topic_vectors()
-                bertopic_model.save(str(model_dir), serialization="safetensors", save_ctfidf=True, save_embedding_model=embedding_model)
+                bertopic_model.save(str(model_dir), serialization="safetensors", save_ctfidf=True, save_embedding_model=self._embedding_to_save(embedding_model))
                 self.logger.info(f"Model re-aligned to Layer {selected_layer} and re-saved.")
             else:
-                self.logger.warning(f"Selected layer {selected_layer} out of range of saved assignments ({len(assignments)} layers). Model not re-aligned.")
+                self.logger.warning(f"Selected layer {selected_layer} is not among the named layers {sorted(assignments)}. Model not re-aligned.")
         else:
             self.logger.warning("No step6_layer_assignments.pkl found — model not re-aligned (rerun Step 6 to generate it).")
             
@@ -421,7 +289,7 @@ class Step6Worker:
         n_docs = 0
         if assignments_path.exists() and selected_layer is not None:
             assignments = pd.read_pickle(assignments_path)
-            if selected_layer < len(assignments):
+            if selected_layer in assignments:
                 arr = assignments[selected_layer]
                 n_docs = int(len(arr))
                 pred_counts = Counter(arr.tolist())
@@ -436,7 +304,7 @@ class Step6Worker:
                     f"{len(primary_discrepancies)} discrepancies."
                 )
             else:
-                self.logger.warning(f"Selected layer {selected_layer} out of range of saved assignments ({len(assignments)}).")
+                self.logger.warning(f"Selected layer {selected_layer} is not among the named layers {sorted(assignments)}.")
         else:
             self.logger.warning("No step6_layer_assignments.pkl found — primary check skipped (rerun Step 6 to generate it).")
 
@@ -445,11 +313,8 @@ class Step6Worker:
         transform_counts = None
         if model_dir.exists():
             try:
-                from sentence_transformers import SentenceTransformer
                 from bertopic import BERTopic
-                emb_name = self.cfg_models.get("embedding", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-                self._seed_everything()
-                embedding_model = SentenceTransformer(emb_name, device=self.cfg_bertopic.get("embedding_device", "cpu"))
+                embedding_model = self._load_embedding_model()
                 bertopic_model = BERTopic.load(str(model_dir), embedding_model=embedding_model)
                 input_file = self.workspace / "data" / "02_intermediate" / "step5_corpus_filtered_relevant.pkl"
                 df = pd.read_pickle(input_file)
@@ -523,117 +388,10 @@ class Step6Worker:
             "report_file": str(report_path),
         }
 
-    # ------------------------------------------------------------------
-    # Granularity indicators (AKL framework, Section 2.2 of the paper)
-    # ------------------------------------------------------------------
-    # Definitions (identical to the scripts that produced the case-study tables):
-    #   DB_norm(k)  = min-max normalization of Davies-Bouldin across candidate layers
-    #   S_norm(k)   = min-max normalization of Silhouette across candidate layers
-    #   Q(k)        = S_norm(k) * (1 - DB_norm(k))            -> Adaptive CVI and Kneedle
-    #   CVI1(k)     = ((S(k)+1)/2) * (1 - DB_norm(k)) / sqrt(k)  -> Standard CVI
-    #   CVI2(k)     = Q(k) / k^alpha, alpha fitted on log(Q+eps) ~ -alpha*log(k)+c
-    # Note: Q(k) is a RELATIVE score, zero by construction for the layer with the
-    # lowest Silhouette and for the layer with the highest Davies-Bouldin.
-    CVI_EPS = 1e-9
-
-    def _reassign_noise(self, embeddings, labels):
-        """Reassign EVoC noise points (-1) to the topic with the nearest centroid
-        (cosine similarity), computed on the non-noise documents only.
-        Returns (labels, n_noise). No-op when there is no noise. This is the same
-        procedure used for the battery case study; the hydrogen case study kept
-        the -1 group as a separate (catch-all) cluster instead."""
-        from sklearn.metrics.pairwise import cosine_similarity
-        labels = labels.copy()
-        noise_mask = labels == -1
-        n_noise = int(noise_mask.sum())
-        if n_noise == 0:
-            return labels, 0
-        topic_ids = np.array(sorted(t for t in set(labels.tolist()) if t != -1))
-        topic_embeddings = np.array([embeddings[labels == t].mean(axis=0) for t in topic_ids])
-        sim = cosine_similarity(embeddings[noise_mask], topic_embeddings)
-        labels[noise_mask] = topic_ids[sim.argmax(axis=1)]
-        return labels, n_noise
-
-    def _compute_cvi(self, df_metrics: pd.DataFrame):
-        """Compute the three granularity indicators from per-layer metrics.
-
-        Input columns: Layer, N_Topics, Silhouette, Davies_Bouldin.
-        Returns (df_metrics_with_indices, info). Pure function of its input
-        (apart from logging), so it can be tested against published tables.
-        """
-        from sklearn.linear_model import LinearRegression
-        eps = self.CVI_EPS
-        df = df_metrics.copy()
-        n_layers = len(df)
-
-        db_min, db_max = df['Davies_Bouldin'].min(), df['Davies_Bouldin'].max()
-        s_min, s_max = df['Silhouette'].min(), df['Silhouette'].max()
-        df['DB_norm'] = (df['Davies_Bouldin'] - db_min) / (db_max - db_min + eps)
-        df['S_norm'] = (df['Silhouette'] - s_min) / (s_max - s_min + eps)       # min-max (Q, Adaptive, Kneedle)
-        df['S_norm_v2'] = (df['Silhouette'] + 1) / 2                             # absolute [-1,1] -> [0,1] (Standard CVI)
-
-        df['Q_score'] = df['S_norm'] * (1 - df['DB_norm'])
-
-        # Decay factor alpha (eps keeps log defined for the layers with Q = 0)
-        X = np.log(df['N_Topics'] + eps).values.reshape(-1, 1)
-        y = np.log(df['Q_score'] + eps).values
-        alpha_hat = float(-LinearRegression().fit(X, y).coef_[0])
-
-        df['CVI1_Sqrt'] = df['S_norm_v2'] * (1 - df['DB_norm']) / np.sqrt(df['N_Topics'])
-        df['CVI2_Adaptive'] = df['Q_score'] / (df['N_Topics'] ** alpha_hat)
-
-        # Diagnostic only (does not take part in the vote): alpha estimated
-        # excluding the layers with Q ~ 0, which are zero by construction.
-        alpha_clean = None
-        df['CVI2_Adaptive_clean'] = np.nan
-        pos = df[df['Q_score'] > 1e-6]
-        if len(pos) >= 3:
-            m = LinearRegression().fit(np.log(pos['N_Topics']).values.reshape(-1, 1), np.log(pos['Q_score']).values)
-            alpha_clean = float(-m.coef_[0])
-            df['CVI2_Adaptive_clean'] = df['Q_score'] / (df['N_Topics'] ** alpha_clean)
-
-        best_cvi1 = int(df.loc[df['CVI1_Sqrt'].idxmax(), 'Layer'])
-        best_cvi2 = int(df.loc[df['CVI2_Adaptive'].idxmax(), 'Layer'])
-        best_cvi2_clean = None
-        if alpha_clean is not None:
-            best_cvi2_clean = int(df.loc[df['CVI2_Adaptive_clean'].idxmax(), 'Layer'])
-
-        # Kneedle (applied to Q(k) in layer order, as in the case-study scripts)
-        kneed = _require("kneed")
-        kneedle = kneed.KneeLocator(df['N_Topics'].values, df['Q_score'].values, curve='concave', direction='increasing')
-        knee_k = kneedle.knee
-        best_kneedle = None
-        if knee_k is not None:
-            best_kneedle = int(df.loc[df['N_Topics'] == knee_k, 'Layer'].iloc[0])
-
-        # Reliability warnings
-        warn = []
-        adaptive_reliable = True
-        if n_layers < 4:
-            adaptive_reliable = False
-            warn.append(f"Adaptive CVI not informative: only {n_layers} candidate layers (alpha is fitted on {n_layers} points, "
-                        f"including the layer(s) with Q=0 by construction).")
-        if alpha_hat < 0:
-            adaptive_reliable = False
-            warn.append(f"Adaptive CVI unreliable: negative decay factor (alpha={alpha_hat:.3f}), which rewards larger k; "
-                        f"driven by the layer(s) with Q=0 in the log-regression.")
-        if n_layers < 5:
-            warn.append(f"Kneedle may be unreliable: only {n_layers} candidate layers.")
-        if alpha_clean is not None and best_cvi2_clean != best_cvi2:
-            warn.append(f"Adaptive CVI maximum changes from Layer {best_cvi2} to Layer {best_cvi2_clean} when alpha is estimated "
-                        f"only from layers with Q>0 (alpha={alpha_clean:.3f}); treat the Adaptive vote with caution.")
-
-        info = {
-            "alpha_hat": alpha_hat, "alpha_clean": alpha_clean,
-            "best_cvi1": best_cvi1, "best_cvi2": best_cvi2, "best_cvi2_clean": best_cvi2_clean,
-            "knee_k": (int(knee_k) if knee_k is not None else None), "best_kneedle": best_kneedle,
-            "adaptive_reliable": adaptive_reliable, "warnings": warn,
-        }
-        return df, info
-
     def _evaluate_and_name_layers(self, bertopic_model, docs, embeddings, df, representation_model):
         from sklearn.metrics import silhouette_score, davies_bouldin_score
-
+        from sklearn.metrics.pairwise import cosine_similarity
+        
         cluster_layers = bertopic_model.hdbscan_model.cluster_layers_
         metrics_data = []
         topic_infos = []
@@ -644,32 +402,35 @@ class Step6Worker:
 
         for layer_idx in range(len(cluster_layers)):
             current_topics = cluster_layers[layer_idx].copy()
-            n_noise_raw = int((current_topics == -1).sum())
-            n_topics = len(set(current_topics.tolist())) - (1 if n_noise_raw > 0 else 0)
+            n_topics = len(set(current_topics)) - (1 if -1 in current_topics else 0)
 
             if n_topics > 1:
-                # Reassign noise to the nearest topic centroid (no-op when there is no noise)
-                current_topics, n_noise = self._reassign_noise(embeddings, current_topics)
-                self.logger.info(
-                    f"Layer {layer_idx}: {n_topics} topics; {n_noise} noise documents reassigned "
-                    f"({100 * n_noise / len(current_topics):.2f}%)."
-                )
-
-                # Metrics (Silhouette: Euclidean, sampled when n > 65,000; Davies-Bouldin: full corpus)
-                sil_sample = min(65000, len(embeddings))
-                sil = silhouette_score(embeddings, current_topics, metric="euclidean", sample_size=sil_sample, random_state=self.seed)
+                # Reassign noise
+                topics_range = range(len(set(current_topics)) - 1)
+                topic_embeddings = np.array([embeddings[current_topics == t].mean(axis=0) for t in topics_range if (current_topics == t).any()])
+                if len(topic_embeddings) > 0:
+                    sim = cosine_similarity(embeddings, topic_embeddings)
+                    new_topics = sim.argmax(axis=1)
+                    noise_mask = current_topics == -1
+                    current_topics[noise_mask] = new_topics[noise_mask]
+                
+                # Metrics
+                sil = silhouette_score(embeddings, current_topics, sample_size=min(65000, len(embeddings)), random_state=42)
                 db = davies_bouldin_score(embeddings, current_topics)
-
+                
+                named = n_topics <= self.max_topics_to_name
                 metrics_data.append({
                     "Layer": layer_idx,
                     "N_Topics": n_topics,
                     "Silhouette": sil,
                     "Davies_Bouldin": db,
-                    "N_Noise_Reassigned": n_noise,
-                    "Pct_Noise_Reassigned": round(100 * n_noise / len(current_topics), 2),
-                    "Silhouette_Sample_Size": sil_sample,
+                    "Named": named,
                 })
-
+                if not named:
+                    self.logger.info(f"  Layer {layer_idx}: {n_topics} topics > cap "
+                                     f"({self.max_topics_to_name}) — metrics only, topics not named.")
+                    continue
+                
                 # Name topics using LLM
                 bertopic_model.update_topics(docs=docs, topics=current_topics, representation_model=representation_model)
                 topic_info = self._name_topics_with_llm(bertopic_model.get_topic_info(), layer_idx, bertopic_model)
@@ -682,101 +443,90 @@ class Step6Worker:
         df_metrics = pd.DataFrame(metrics_data)
         if df_metrics.empty:
             raise RuntimeError("No valid layers with >1 clusters found.")
-
-        df_metrics, info = self._compute_cvi(df_metrics)
-        alpha_hat = info["alpha_hat"]
-        best_cvi1, best_cvi2, best_kneedle, knee_k = info["best_cvi1"], info["best_cvi2"], info["best_kneedle"], info["knee_k"]
-        for w in info["warnings"]:
-            self.logger.warning(w)
+            
+        db_min, db_max = df_metrics['Davies_Bouldin'].min(), df_metrics['Davies_Bouldin'].max()
+        df_metrics['DB_norm'] = (df_metrics['Davies_Bouldin'] - db_min) / (db_max - db_min + 1e-9)
+        df_metrics['S_norm_v2'] = (df_metrics['Silhouette'] + 1) / 2
+        
+        df_metrics['Q_score'] = df_metrics['S_norm_v2'] * (1 - df_metrics['DB_norm'])
+        
+        # Regression for alpha
+        from sklearn.linear_model import LinearRegression
+        eps = 1e-9
+        X = np.log(df_metrics['N_Topics'] + eps).values.reshape(-1, 1)
+        y = np.log(df_metrics['Q_score'] + eps).values
+        model = LinearRegression().fit(X, y)
+        alpha_hat = -model.coef_[0]
+        
+        # CVIs
+        df_metrics['CVI1_Sqrt'] = df_metrics['Q_score'] / np.sqrt(df_metrics['N_Topics'])
+        df_metrics['CVI2_Adaptive'] = df_metrics['Q_score'] / (df_metrics['N_Topics'] ** alpha_hat)
+        
+        best_cvi1 = df_metrics.loc[df_metrics['CVI1_Sqrt'].idxmax(), 'Layer']
+        best_cvi2 = df_metrics.loc[df_metrics['CVI2_Adaptive'].idxmax(), 'Layer']
+        
+        # Kneedle
+        kneed = _require("kneed")
+        kneedle = kneed.KneeLocator(df_metrics['N_Topics'].values, df_metrics['Q_score'].values, curve='concave', direction='increasing')
+        knee_k = kneedle.knee
+        
+        best_kneedle = None
+        if knee_k is not None:
+            best_kneedle = df_metrics.loc[df_metrics['N_Topics'] == knee_k, 'Layer'].iloc[0]
 
         suggested_layers = {
             "cvi1_sqrt": int(best_cvi1),
             "cvi2_adaptive": int(best_cvi2),
             "kneedle": int(best_kneedle) if best_kneedle is not None else None
         }
-
+        
         consensus_reached = False
         final_best_idx = None
-
+        
         if best_cvi1 == best_cvi2:
             if best_kneedle is None or best_kneedle == best_cvi1:
-                # An automatic choice is only taken when the Adaptive CVI is informative;
-                # otherwise the decision is delegated to the expert (set
-                # step6_evoc.require_reliable_indicators: false to disable this guard).
-                if info["adaptive_reliable"] or not self.cfg_bertopic.get("require_reliable_indicators", True):
-                    consensus_reached = True
-                    final_best_idx = int(best_cvi1)
-                else:
-                    self.logger.warning("Indicators agree, but the Adaptive CVI is not reliable: human validation required.")
+                consensus_reached = True
+                final_best_idx = int(best_cvi1)
+
+        # A layer above the naming cap has no topic names/exports: it cannot be auto-selected
+        if consensus_reached and final_best_idx not in valid_layer_indices:
+            self.logger.warning(f"Metrics agree on layer {final_best_idx}, but it has more than "
+                                f"{self.max_topics_to_name} topics and was not named — asking the specialist to choose.")
+            consensus_reached = False
+            final_best_idx = None
 
         # Generate Reports
         cvi_md_path = self.workspace / "data" / "04_reports" / "step6_cvi_report.md"
         plot_path = self.workspace / "data" / "04_reports" / "step6_kneedle_plot.png"
-
-        info["evoc_params"] = getattr(self, "_evoc_params", None)
-        self._generate_cvi_report(df_metrics, alpha_hat, suggested_layers, consensus_reached, cvi_md_path, info)
+        
+        self._generate_cvi_report(df_metrics, alpha_hat, suggested_layers, consensus_reached, cvi_md_path)
         self._generate_kneedle_plot(df_metrics, knee_k, plot_path)
 
-        first_layer_topics = next(iter(all_topics_per_layer.values()), None)
-        self._update_state("running",
+        self._update_state("running", 
                            output_dict={"cvi_report_file": str(cvi_md_path), "kneedle_plot_file": str(plot_path)},
-                           params={"n_topics_found": len(set(first_layer_topics.tolist())) if first_layer_topics is not None else 0,
-                                   "cvi_alpha": float(alpha_hat),
-                                   "cvi_alpha_clean": info["alpha_clean"],
-                                   "cvi_adaptive_reliable": bool(info["adaptive_reliable"]),
-                                   "cvi_warnings": info["warnings"],
-                                   "evoc_params": getattr(self, "_evoc_params", None)})
+                           params={"n_topics_found": len(set(next(iter(all_topics_per_layer.values())))) if len(all_topics_per_layer)>0 else 0, "cvi_alpha": float(alpha_hat)})
 
-        idx_mapping = {layer_num: i for i, layer_num in enumerate(valid_layer_indices)}
-        mapped_best = idx_mapping[final_best_idx] if final_best_idx is not None else None
+        # Keyed by the original EVoC layer number, so exports, maps and the CVI report share one numbering
+        return (final_best_idx, consensus_reached, suggested_layers,
+                dict(zip(valid_layer_indices, topic_infos)), all_topics_per_layer)
 
-        return mapped_best, consensus_reached, suggested_layers, topic_infos, list(all_topics_per_layer.values())
-
-    def _generate_cvi_report(self, df_metrics, alpha_hat, suggested_layers, consensus_reached, report_path, info=None):
-        info = info or {}
+    def _generate_cvi_report(self, df_metrics, alpha_hat, suggested_layers, consensus_reached, report_path):
         md = f"# EVoC CVI Analysis Report\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-        md += "## Definitions\n"
-        md += "- `DB_norm`: min-max normalization of the Davies-Bouldin index across the candidate layers.\n"
-        md += "- `Q(k) = S_norm * (1 - DB_norm)`, with `S_norm` the min-max normalized Silhouette across the candidate layers. "
-        md += "Q is a relative score: it is zero by construction for the layer with the lowest Silhouette and for the layer with the highest Davies-Bouldin. "
-        md += "It feeds the Adaptive CVI and Kneedle.\n"
-        md += "- **CVI 1 (Standard)** `= ((S + 1) / 2) * (1 - DB_norm) / sqrt(k)`.\n"
-        md += "- **CVI 2 (Adaptive)** `= Q(k) / k^alpha`, with alpha fitted on `log(Q + 1e-9)` versus `log(k)`.\n"
-        md += "- Silhouette: Euclidean distance on the embeddings (sampled if the corpus exceeds 65,000 documents). Davies-Bouldin: full corpus.\n"
-        if info.get("evoc_params"):
-            md += f"- EVoC parameters used: `{info['evoc_params']}`\n"
-        md += "\n"
-
         md += f"**Alpha estimated via Linear Regression:** {alpha_hat:.4f}\n\n"
-        if info.get("alpha_clean") is not None:
-            md += (f"**Alpha excluding layers with Q=0 (diagnostic only):** {info['alpha_clean']:.4f} "
-                   f"(Adaptive CVI maximum at Layer {info['best_cvi2_clean']})\n\n")
-
+        
         md += "## Metrics per Layer\n"
-        cols = ['Layer', 'N_Topics', 'Silhouette', 'Davies_Bouldin', 'Q_score', 'CVI1_Sqrt', 'CVI2_Adaptive']
-        for extra in ['CVI2_Adaptive_clean', 'N_Noise_Reassigned', 'Pct_Noise_Reassigned']:
-            if extra in df_metrics.columns:
-                cols.append(extra)
-        md += df_metrics[cols].to_markdown(index=False)
-
+        md += df_metrics[['Layer', 'N_Topics', 'Named', 'Silhouette', 'Davies_Bouldin', 'Q_score', 'CVI1_Sqrt', 'CVI2_Adaptive']].to_markdown(index=False)
+        
         md += "\n\n## Recommendations\n"
-        md += f"- **CVI 1 (Standard)** suggests Layer: **{suggested_layers['cvi1_sqrt']}**\n"
+        md += f"- **CVI 1 (Sqrt)** suggests Layer: **{suggested_layers['cvi1_sqrt']}**\n"
         md += f"- **CVI 2 (Adaptive)** suggests Layer: **{suggested_layers['cvi2_adaptive']}**\n"
-        kneedle_txt = suggested_layers['kneedle'] if suggested_layers['kneedle'] is not None else "none (no knee returned)"
-        md += f"- **Kneedle Algorithm** suggests Layer: **{kneedle_txt}**\n\n"
-
-        if info.get("warnings"):
-            md += "## Reliability warnings\n"
-            for w in info["warnings"]:
-                md += f"- ⚠️ {w}\n"
-            md += "\n"
-
+        md += f"- **Kneedle Algorithm** suggests Layer: **{suggested_layers['kneedle']}**\n\n"
+        
         if consensus_reached:
             md += "✅ **CONSENSUS REACHED.** The pipeline has automatically selected this optimal layer.\n"
         else:
-            md += "⚠️ **NO CONSENSUS.** The metrics diverged or were not reliable. Please check the `step6_kneedle_plot.png` and 2D maps to decide which layer to select based on your research goals.\n"
-
+            md += "⚠️ **NO CONSENSUS.** The metrics diverged. Please check the `step6_kneedle_plot.png` and 2D maps to decide which layer to select based on your research goals.\n"
+            
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(md)
 
@@ -812,14 +562,14 @@ class Step6Worker:
         self._update_state("running", output_dict={"cluster_maps_folder": str(out_dir)})
 
         # Check if we have layers with < 50 topics
-        layers_to_plot = [i for i, info in enumerate(topic_infos) if len(info) < 50]
+        layers_to_plot = [i for i, info in topic_infos.items() if len(info) < 50]
         
         if not layers_to_plot:
             self.logger.info("No layers with < 50 topics found. Skipping 2D maps.")
             return
 
         self.logger.info("Computing global UMAP 2D reduction for cluster maps...")
-        reduced_embeddings = umap.UMAP(n_components=2, random_state=self.seed).fit_transform(embeddings)
+        reduced_embeddings = umap.UMAP(n_components=2, random_state=42).fit_transform(embeddings)
 
         for i in layers_to_plot:
             self.logger.info(f"Generating 2D map for Layer {i}...")
@@ -871,9 +621,9 @@ class Step6Worker:
             try: old_file.unlink()
             except: pass
 
-        layers_overview = pd.DataFrame([{"Layer": idx, "N_Topics": len(ti), "Selected": "★" if idx == best_layer_idx else ""} for idx, ti in enumerate(topic_infos)])
+        layers_overview = pd.DataFrame([{"Layer": idx, "N_Topics": len(ti), "Selected": "★" if idx == best_layer_idx else ""} for idx, ti in topic_infos.items()])
 
-        for layer_idx, topic_info in enumerate(topic_infos):
+        for layer_idx, topic_info in topic_infos.items():
             topics_array = all_topics_per_layer[layer_idx]
             kw_col = "Aspect1" if "Aspect1" in topic_info.columns else "Representation"
 
@@ -899,7 +649,6 @@ class Step6Worker:
                     grp[cols_to_save].to_excel(writer, sheet_name=sheet_label, index=False)
 
     def _build_models(self):
-        from sentence_transformers import SentenceTransformer
         from bertopic import BERTopic
         from bertopic.representation import OpenAI as BERTopicOpenAI, KeyBERTInspired
         from bertopic.dimensionality import BaseDimensionalityReduction
@@ -907,25 +656,12 @@ class Step6Worker:
         import openai
         import evoc
 
-        emb_name = self.cfg_models.get("embedding", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-        device = self.cfg_bertopic.get("embedding_device", "cpu")
-        self.logger.info(f"Loading embedding model: {emb_name}")
-        if device != "cpu":
-            self.logger.warning(
-                f"embedding_device='{device}' is not CPU: embedding vectors may vary between "
-                "runs/hardware (non-deterministic GPU kernels), so outputs may not be identical "
-                "even with a fixed seed."
-            )
-        embedding_model = SentenceTransformer(emb_name, device=device)
+        embedding_model = self._load_embedding_model()
 
-        # EVoC clustering model (random_state guarded by inspect.signature inside
-        # _build_evoc_kwargs — warns instead of working around an unsupported arg).
-        self._seed_everything()
-        evoc_kwargs = self._build_evoc_kwargs()
-        self.logger.info(f"Building EVoC with kwargs: {evoc_kwargs}")
-        evoc_model = evoc.EVoC(**evoc_kwargs)
-        self._evoc_params = self._collect_evoc_params(evoc_model)
-        self.logger.info(f"EVoC effective parameters: {self._evoc_params}")
+        evoc_model = evoc.EVoC(
+            noise_level=self.cfg_bertopic.get("evoc_noise_level", 0.12),
+            random_state=self.cfg_bertopic.get("evoc_random_state", 42),
+        )
         umap_model = BaseDimensionalityReduction()
         vectorizer_model = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=self.cfg_bertopic.get("min_df", 5))
 
@@ -943,7 +679,8 @@ class Step6Worker:
             llm_model = self.cfg_models.get("llm_extraction", "gemma-3-4b-instruct")
 
             llm_rep = BERTopicOpenAI(client, model=llm_model, chat=True, nr_docs=5, diversity=0.3,
-                                     generator_kwargs={"temperature": 0.0, "seed": self.seed}, prompt="""
+                                     doc_length=self.cfg_bertopic.get("llm_doc_length", 250),
+                                     tokenizer="whitespace", prompt="""
 You will extract a short topic label from given documents and keywords.
 [DOCUMENTS]
 Keywords: [KEYWORDS]
@@ -959,27 +696,79 @@ topic: <topic_label>""")
         )
         return embedding_model, bertopic_model, representation_model
 
-    def _get_embeddings(self, docs: list, embedding_model) -> np.ndarray:
+    def _load_embedding_model(self):
+        """Remote embedding server (embedding_server.enabled) or local SentenceTransformer."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import build_embedding_model
+        self.logger.info(f"Loading embedding model: {self.cfg_models.get('embedding', '')}")
+        return build_embedding_model(self.config, self.logger,
+                                     device=self.cfg_bertopic.get("embedding_device", "cpu"))
+
+    def _embedding_to_save(self, embedding_model):
+        """A remote embedder is not serializable: save only the model name."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import RemoteEmbedder
+        if isinstance(embedding_model, RemoteEmbedder):
+            return self.cfg_models.get("embedding", "")
+        return embedding_model
+
+    def _reuse_step3_embeddings(self, dois):
+        """Rows of the Step 3 embedding cache for these DOIs (same model/backend/text), or None."""
+        if dois is None or not self.cfg_bertopic.get("reuse_step3_embeddings", True):
+            return None
+        ck = self.workspace / "data" / "checkpoints"
+        e3, m3 = ck / "step3_embeddings.pkl", ck / "step3_embeddings_meta.json"
+        c2 = self.workspace / "data" / "02_intermediate" / "step2_corpus_clean.pkl"
+        if not (e3.exists() and m3.exists() and c2.exists()):
+            return None
+        from remote_embedder import embedding_backend_id
+        p3 = {"model": self.cfg_models.get("embedding", ""),
+              "prompt": self.config.get("step3_bertopic", {}).get("embedding_prompt") or "",
+              "backend": embedding_backend_id(self.config)}
+        if json.load(open(m3)).get("checksum") != hashlib.md5(json.dumps(p3, sort_keys=True).encode()).hexdigest():
+            return None   # Step 3 used a different model/backend/prompt
+        corpus_dois = pd.read_pickle(c2)["doi"].astype(str).str.lower().str.strip()
+        emb3 = np.asarray(pd.read_pickle(e3))
+        if len(emb3) != len(corpus_dois):
+            return None
+        pos = {k: i for i, k in enumerate(corpus_dois)}
+        rows = dois.astype(str).str.lower().str.strip().map(pos)
+        if rows.isna().any():
+            return None
+        return emb3[rows.astype(int).to_numpy()]
+
+    def _get_embeddings(self, docs: list, embedding_model, dois=None) -> np.ndarray:
         checkpoints_dir = self.workspace / "data" / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         emb_path = checkpoints_dir / "step6_embeddings.pkl"
         meta_path = checkpoints_dir / "step6_embeddings_meta.json"
-        
-        params = {"model": self.cfg_models.get("embedding", "")}
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import embedding_backend_id
+        params = {"model": self.cfg_models.get("embedding", ""),
+                  "backend": embedding_backend_id(self.config)}
         current_checksum = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()
-        
+        # Fingerprint of the exact document list: a different filter with the same size must not hit the cache
+        docs_md5 = hashlib.md5("\n".join(docs).encode("utf-8", "ignore")).hexdigest()
+
         if emb_path.exists() and meta_path.exists():
             meta = json.load(open(meta_path, "r"))
-            if meta.get("checksum") == current_checksum and meta.get("n_docs") == len(docs):
+            if (meta.get("checksum") == current_checksum and meta.get("n_docs") == len(docs)
+                    and meta.get("docs_md5", docs_md5) == docs_md5):
                 self.logger.info("Loading cached embeddings.")
+                if "docs_md5" not in meta:   # upgrade a legacy cache entry
+                    json.dump({**meta, "docs_md5": docs_md5}, open(meta_path, "w"))
                 return pd.read_pickle(str(emb_path))
-                
-        self.logger.info(f"Computing embeddings for {len(docs)} documents...")
-        self._seed_everything()
-        embeddings = embedding_model.encode(docs, show_progress_bar=True)
+
+        embeddings = self._reuse_step3_embeddings(dois)
+        if embeddings is not None:
+            self.logger.info(f"Reusing {len(embeddings)} embeddings from the Step 3 cache (same model, backend and text).")
+        else:
+            self.logger.info(f"Computing embeddings for {len(docs)} documents...")
+            embeddings = embedding_model.encode(docs, show_progress_bar=True)
         pd.to_pickle(embeddings, str(emb_path))
         with open(meta_path, "w") as f:
-            json.dump({"checksum": current_checksum, "n_docs": len(docs)}, f)
+            json.dump({"checksum": current_checksum, "n_docs": len(docs), "docs_md5": docs_md5}, f)
         return embeddings
 
     def _name_topics_with_llm(self, topic_info: pd.DataFrame, layer_idx: int = 0,
@@ -1010,7 +799,7 @@ DATA:
 OUTPUT FORMAT:
 Return ONLY a pipe-separated list with two columns: Topic | New_Label"""
         try:
-            resp = client.chat.completions.create(model=llm_model, messages=[{"role": "user", "content": prompt}], temperature=0.0, seed=self.seed, max_tokens=512)
+            resp = client.chat.completions.create(model=llm_model, messages=[{"role": "user", "content": prompt}], temperature=0.1, max_tokens=512)
             refined = pd.read_csv(io.StringIO(resp.choices[0].message.content), sep="|", names=["Topic", "New_Label"], skipinitialspace=True)
             refined["Topic"] = pd.to_numeric(refined["Topic"], errors="coerce")
             refined = refined.dropna(subset=["Topic"])

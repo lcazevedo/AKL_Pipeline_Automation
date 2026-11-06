@@ -15,7 +15,7 @@ Inform the user:
 > "Starting Step 9. The pipeline is using Seaborn and Matplotlib to draw Hierarchical Clustermaps (Dendrograms), Likert-scale Efficiency Charts, and Growth Curves."
 
 Use `cmd_exec` to run the worker:
-`./run_worker.sh workers/step9_worker.py plot_standard`
+`python workers/step9_worker.py plot_standard`
 
 ---
 
@@ -23,7 +23,7 @@ Use `cmd_exec` to run the worker:
 1. Read the expert-validated text: `data/04_reports/step8_insights_review.md`.
 2. Analyze the text to identify if the expert asked for any ad-hoc visualization. If YES, generate it via python script.
 3. Generate the validation & audit summary (reviewer-requested transparency):
-   `./run_worker.sh workers/step9_worker.py audit_summary`
+   `python workers/step9_worker.py audit_summary`
    This reads the Step 6 verify report and the Step 8 audit report and writes
    `data/04_reports/step9_audit_summary.md`.
 4. **Assembly:** Create a new file called `data/04_reports/AKL_Final_Report.md`. 
@@ -41,7 +41,7 @@ Use `cmd_exec` to run the worker:
 
 ## Phase 3: HTML Compilation
 Once `AKL_Final_Report.md` is ready and saved, use `cmd_exec` to compile it:
-`./run_worker.sh workers/step9_worker.py compile_html`
+`python workers/step9_worker.py compile_html`
 
 ## Phase 4: Final Message
 Inform the user:

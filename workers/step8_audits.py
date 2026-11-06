@@ -27,11 +27,6 @@ import warnings
 from pathlib import Path
 from datetime import datetime
 
-try:
-    from workers.reference_date import reference_year as _reference_year
-except ImportError:  # executed from inside workers/
-    from reference_date import reference_year as _reference_year
-
 import pandas as pd
 import numpy as np
 
@@ -54,6 +49,9 @@ def run_evoc_sensitivity(workspace):
     from sklearn.metrics import adjusted_rand_score
 
     assignments = pd.read_pickle(path)
+    # Step 6 saves a dict {EVoC layer id: assignments}; keep the original layer ids in the report
+    ids = sorted(assignments) if isinstance(assignments, dict) else list(range(len(assignments)))
+    assignments = [assignments[k] for k in ids] if isinstance(assignments, dict) else list(assignments)
     if len(assignments) < 2:
         return None
 
@@ -71,7 +69,7 @@ def run_evoc_sensitivity(workspace):
     for i in range(n_layers):
         for j in range(i + 1, n_layers):
             ari = float(adjusted_rand_score(assignments[i], assignments[j]))
-            md.append(f"| Layer {i} vs Layer {j} | {sizes[i]} → {sizes[j]} | {ari:.3f} |")
+            md.append(f"| Layer {ids[i]} vs Layer {ids[j]} | {sizes[i]} → {sizes[j]} | {ari:.3f} |")
     md.append("")
     return "\n".join(md)
 
@@ -176,7 +174,7 @@ def run_regression_audit(df):
     if kw is not None:
         md.append(
             f"\nKruskal-Wallis across topics: H = {kw.statistic:.2f}, p = {kw.pvalue:.4f} "
-            "(exploratory; differences may reflect document age and are not interpreted causally)."
+            "(p < 0.05 → citation counts differ across topics)."
         )
     if max_change is not None:
         md.append(
@@ -189,16 +187,13 @@ def run_regression_audit(df):
 
 # ── Reviewer #11: growth model fitting with AICc ─────────────────────────────
 
-def run_growth_aicc(df, workspace="."):
-    """Growth model selection per macro-category using AICc (exploratory).
+def run_growth_aicc(df):
+    """Formal growth model selection per macro-category using AICc.
 
-    Models: Plateau (constant), Linear, and Exponential. All three are fitted to
-    the annual counts on the ORIGINAL scale by least squares (the exponential by
-    non-linear least squares), so that their residual sums of squares, and hence
-    their AICc values, are comparable. The number of parameters k includes the
-    residual variance. The partial reference year is excluded, and at least
-    five complete years are required; otherwise the module reports a skip note.
-    ΔAICc < 2 means the models are not distinguishable.
+    Models: Plateau (constant), Linear, Exponential (log-linear). The best
+    model per category is chosen by minimum AICc; ΔAICc < 2 means the models
+    are statistically indistinguishable. The heuristic recent-ratio is kept as
+    a secondary column for continuity with the original report.
     """
     if "year" not in df.columns or "macro_category" not in df.columns:
         return None
@@ -206,11 +201,8 @@ def run_growth_aicc(df, workspace="."):
     if d.empty:
         return None
 
-    from scipy.optimize import curve_fit
-
-    current_year = _reference_year(workspace)
+    current_year = datetime.now().year
     recent_years = [current_year, current_year - 1, current_year - 2]
-    min_years = 5
 
     def aicc(rss, n, k):
         if n <= k + 1 or rss <= 0:
@@ -219,37 +211,30 @@ def run_growth_aicc(df, workspace="."):
         ll = -n / 2 * (np.log(2 * np.pi * sigma2) + 1)
         return 2 * k - 2 * ll + 2 * k * (k + 1) / (n - k - 1)
 
-    rows, skipped = [], 0
+    rows = []
     for cat, g in d.groupby("macro_category"):
         counts = g["year"].value_counts().sort_index()
-        counts = counts[counts.index < current_year]          # drop the partial year
         years = counts.index.to_numpy(dtype=float)
         y = counts.to_numpy(dtype=float)
         n = len(years)
-        if n < min_years:
-            skipped += 1
+        if n < 4:
             continue
-        t = years - years.min()
 
-        # Plateau: constant mean (mean + variance -> k = 2)
+        # Plateau: constant mean
         rss_p = float(np.sum((y - y.mean()) ** 2))
-        # Linear: y = a + b t (k = 3)
-        A = np.vstack([np.ones(n), t]).T
+        # Linear: y ~ a + b*year
+        A = np.vstack([np.ones(n), years]).T
         b_l, *_ = np.linalg.lstsq(A, y, rcond=None)
         rss_l = float(np.sum((y - A @ b_l) ** 2))
-        # Exponential: y = a exp(b t), fitted on the original scale (k = 3)
-        try:
-            b0 = np.polyfit(t, np.log(np.maximum(y, 1.0)), 1)
-            popt, _ = curve_fit(lambda tt, a, b: a * np.exp(b * tt), t, y,
-                                p0=[np.exp(b0[1]), b0[0]], maxfev=10000)
-            rss_e = float(np.sum((y - popt[0] * np.exp(popt[1] * t)) ** 2))
-        except Exception:
-            rss_e = float("inf")
+        # Exponential: log(y) ~ a + b*year
+        ylog = np.log(np.maximum(y, 1e-9))
+        b_e, *_ = np.linalg.lstsq(A, ylog, rcond=None)
+        rss_e = float(np.sum((ylog - A @ b_e) ** 2))
 
         scores = {
-            "Plateau": aicc(rss_p, n, 2),
-            "Linear": aicc(rss_l, n, 3),
-            "Exponential": aicc(rss_e, n, 3),
+            "Plateau": aicc(rss_p, n, 1),
+            "Linear": aicc(rss_l, n, 2),
+            "Exponential": aicc(rss_e, n, 2),
         }
         best = min(scores, key=scores.get)
         second = sorted(scores.values())[1]
@@ -263,26 +248,19 @@ def run_growth_aicc(df, workspace="."):
             "recent_ratio": recent_ratio,
             "best_model": best,
             "AICc": round(scores[best], 1),
-            "ΔAICc to 2nd": round(second - scores[best], 1),
+            "ΔAICc vs 2nd": round(scores[best] - second, 1),
         })
 
-    md = ["### Growth Model Fitting (exploratory)\n"]
     if not rows:
-        md.append(
-            f"Skipped: fewer than {min_years} complete years of data per category "
-            f"(reference year {current_year} excluded as partial). Growth models are not "
-            "fitted on such short series.\n"
-        )
-        return "\n".join(md)
+        return None
 
     out = pd.DataFrame(rows).sort_values("total_mentions", ascending=False)
+    md = ["### Growth Model Fitting (reviewer #11)\n"]
     md.append(
-        "Model selection per macro-category among Plateau (constant), Linear, and "
-        "Exponential growth of annual counts, all fitted on the original scale and "
-        "compared by AICc. ΔAICc to 2nd < 2 → the best two models are not "
-        f"distinguishable. Partial year {current_year} excluded; {skipped} categories "
-        f"with fewer than {min_years} complete years skipped. Counts are extracted "
-        "mentions, not documents; results are exploratory.\n"
+        "Formal model selection per macro-category: Plateau (constant), Linear, or "
+        "Exponential (log-linear), chosen by minimum AICc. ΔAICc < 2 → models are "
+        "statistically indistinguishable. The heuristic recent-ratio is kept for "
+        "continuity with the original classification.\n"
     )
     md.append(out.head(20).to_markdown(index=False) + "\n")
     return "\n".join(md)
@@ -331,12 +309,7 @@ def run_all_auto_audits(df, workspace):
     sections = []
     for fn in (run_evoc_sensitivity, run_regression_audit, run_growth_aicc, run_ri_sensitivity):
         try:
-            if fn is run_growth_aicc:
-                section = fn(df, workspace)
-            elif fn in (run_regression_audit, run_ri_sensitivity):
-                section = fn(df)
-            else:
-                section = fn(workspace)
+            section = fn(df) if fn in (run_regression_audit, run_growth_aicc, run_ri_sensitivity) else fn(workspace)
             if section:
                 sections.append(section)
         except Exception as e:  # audits must never break the crunching report

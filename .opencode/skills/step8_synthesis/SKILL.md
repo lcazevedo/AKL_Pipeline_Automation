@@ -21,7 +21,7 @@ Inform the user:
 > "Starting Step 8 using Agent-Driven Analysis. I will trigger the local worker to compute the Advanced Matrices (Growth Regimes, Impact Quadrants, Bottlenecks, and Geopolitical Profiles) using Pandas."
 
 Use the `cmd_exec` tool to run the data crunching worker:
-`./run_worker.sh workers/step8_worker.py run`
+`python workers/step8_worker.py run`
 
 The worker now also:
 1. Runs the **automated audits** (reviewer validations #5, #9, #10, #11) and appends them as Section 5 of `step8_data_crunching.md`:
@@ -41,7 +41,7 @@ The Step 8 "study" phase also covers **auditing** the pipeline's classification 
 
 1. Read the `audits:` section of `pipeline_config.yaml` to see which audits are enabled.
 2. The audit export already ran inside `step8_worker.py run` (Phase 1). If it needs to be re-run standalone:
-   `./run_worker.sh workers/audit_framework.py export`
+   `python workers/audit_framework.py export`
 3. Report to the user which audit files were generated:
    > "Audit samples exported to `data/03_review/step8_audit_<name>.xlsx`. Please review them during this breakpoint and fill the `audit_label` column with the correct labels."
 
@@ -124,7 +124,7 @@ Inform the user:
 If the user confirms they have validated/edited the Markdown file (e.g., "validated"):
 
 1. If any audit review files were exported (Phase 1.5), run the audit metrics computation:
-   `./run_worker.sh workers/step8_worker.py compute_audits`
+   `python workers/step8_worker.py compute_audits`
    This reads the reviewed `audit_label` columns and writes `data/04_reports/step8_audit_report.md`.
 2. Use your python or file tools to update `pipeline_state.json` setting Step 8 status to `completed` and registering the `completed_at` timestamp.
 

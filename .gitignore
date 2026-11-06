@@ -1,0 +1,77 @@
+# ==========================================
+# Data, Models and Checkpoints (AKL Pipeline)
+# ==========================================
+# Ignores the whole dynamic structure of data folders and very large files
+data/
+checkpoints/
+
+# ==========================================
+# Execution Logs
+# ==========================================
+# Keeps the pipeline log, which grows at every execution, out of the commits
+execution.log
+*.log
+
+# ==========================================
+# Python
+# ==========================================
+# Compilation caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments (in case someone creates them inside the folder)
+.env
+.venv
+env/
+venv/
+ENV/
+akl_automation/
+akl_setfit/
+
+# Python distributions and binaries
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ==========================================
+# Jupyter Notebooks (if used for tests)
+# ==========================================
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# ==========================================
+# IDEs and Text Editors
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# Operating System Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ==========================================
+# Pipeline State (Optional)
+# ==========================================
+# Uncomment the line below to ignore the current state of your pipeline
+# and not version the progress of your executions at every commit:
+# pipeline_state.json
+
+# ==========================================
+# Execution Files (not versioned)
+# ==========================================
+# Current pipeline state (progress of the executions)
+pipeline_state.json
+wos/
+runs/

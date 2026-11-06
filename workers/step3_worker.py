@@ -28,8 +28,6 @@ import hashlib
 import io
 import json
 import logging
-import os
-import random
 import sys
 import time
 import warnings
@@ -45,10 +43,6 @@ import yaml
 warnings.filterwarnings("ignore")
 
 np.bool = np.bool_  # bertopic/evoc compatibility
-
-# EVoC keys that were removed from the configuration. They are ignored (with a
-# warning) so that old configuration files keep working unchanged.
-DEPRECATED_EVOC_KEYS = ("min_num_clusters", "next_cluster_size_quantile")
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -94,16 +88,9 @@ class Step3Worker:
         self.cfg_bertopic = self.config.get("step3_bertopic", {})
         self.cfg_vllm = self.config.get("step7_vllm", {})  # shared vLLM config
         self.cfg_models = self.config.get("models", {})
-        self.cfg_repro = self.config.get("reproducibility", {}) or {}
 
         # Topic naming mode: "vllm" (default) or "agent" (orchestrator LLM names topics)
         self.naming_mode = naming_mode
-
-        # Reproducibility: resolve the effective seed and warn on deprecated EVoC keys.
-        self.global_seed = self.cfg_repro.get("seed", 42)
-        self.seed = self._resolve_seed(self.cfg_bertopic.get("random_state"))
-        self._evoc_params = None
-        self._warn_deprecated_evoc_keys("step3_bertopic", self.cfg_bertopic)
 
         # Topic range for layer selection
         self.topic_range_min = self.cfg_bertopic.get("topic_range_min", 10)
@@ -113,115 +100,6 @@ class Step3Worker:
         self.logger.info("Step3Worker initialized.")
         self.logger.info(f"Target topic range: {self.topic_range_min}–{self.topic_range_max}")
         self.logger.info(f"Topic naming mode: {self.naming_mode}")
-        self.logger.info(f"Random seed: {self.seed}")
-
-    # ── Reproducibility helpers ───────────────────────────────────────────────
-
-    def _resolve_seed(self, value):
-        """Resolve a step-level seed. `None` inherits the global seed."""
-        if value is None:
-            value = self.global_seed
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 42
-
-    def _warn_deprecated_evoc_keys(self, section: str, cfg: dict) -> None:
-        """Warn if the config still carries EVoC keys removed from the pipeline."""
-        for key in DEPRECATED_EVOC_KEYS:
-            if key in cfg:
-                self.logger.warning(
-                    f"[{section}] configuration key '{key}' is deprecated and ignored; "
-                    "use 'max_layers' and/or 'min_similarity_threshold' instead."
-                )
-
-    def _seed_everything(self) -> None:
-        """Seed Python, NumPy and Torch right before a stochastic operation."""
-        os.environ.setdefault("PYTHONHASHSEED", str(self.seed))
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        try:
-            import torch
-            torch.manual_seed(self.seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self.seed)
-        except Exception:
-            pass
-
-    def _build_evoc_kwargs(self) -> dict:
-        """Build EVoC kwargs from config, guarding against unsupported arguments.
-
-        Only the parameters accepted by the installed EVoC version are passed.
-        If `random_state` is not supported, a clear warning is logged (without
-        trying to work around it) stating the run will not be reproducible.
-        """
-        import inspect
-        import evoc
-
-        kwargs = {"noise_level": self.cfg_bertopic.get("evoc_noise_level", 0.12)}
-        try:
-            params = inspect.signature(evoc.EVoC.__init__).parameters
-        except (TypeError, ValueError):
-            params = {}
-
-        if "random_state" in params:
-            kwargs["random_state"] = self.seed
-        else:
-            self.logger.warning(
-                "Installed EVoC version does not accept 'random_state': the clustering "
-                "will NOT be reproducible. Upgrade to evoc>=0.3.1 to enable deterministic runs."
-            )
-
-        for key in ("max_layers", "min_similarity_threshold"):
-            if key in self.cfg_bertopic and self.cfg_bertopic.get(key) is not None:
-                if key in params:
-                    kwargs[key] = self.cfg_bertopic[key]
-                else:
-                    self.logger.warning(
-                        f"Installed EVoC version does not accept '{key}': ignoring the configured value."
-                    )
-        return kwargs
-
-    def _collect_evoc_params(self, evoc_model) -> dict:
-        try:
-            return {k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
-                    for k, v in evoc_model.get_params().items()}
-        except Exception:
-            return {}
-
-    def _reproducibility_info(self) -> dict:
-        """Snapshot of the parameters/versions that affect reproducibility."""
-        from importlib.metadata import version as _pkg_version
-
-        def _ver(pkg: str) -> str:
-            try:
-                return _pkg_version(pkg)
-            except Exception:
-                return "unknown"
-
-        numba_threads = None
-        try:
-            import numba
-            numba_threads = int(numba.get_num_threads())
-        except Exception:
-            pass
-
-        device = self.cfg_bertopic.get("embedding_device", "cpu")
-        return {
-            "seed": self.seed,
-            "global_seed": self.global_seed,
-            "evoc_version": _ver("evoc"),
-            "numba_version": _ver("numba"),
-            "numba_num_threads_effective": numba_threads,
-            "numba_num_threads_env": os.environ.get("NUMBA_NUM_THREADS"),
-            "numpy_version": _ver("numpy"),
-            "scikit_learn_version": _ver("scikit-learn"),
-            "bertopic_version": _ver("bertopic"),
-            "sentence_transformers_version": _ver("sentence-transformers"),
-            "torch_version": _ver("torch"),
-            "embedding_device": device,
-            "evoc_params": self._evoc_params,
-        }
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -249,8 +127,7 @@ class Step3Worker:
             # 5. Compute or load cached embeddings
             embeddings = self._get_embeddings(docs, embedding_model)
 
-            # 6. Fit BERTopic (seeded right before the stochastic fit/clustering)
-            self._seed_everything()
+            # 6. Fit BERTopic
             self.logger.info("Fitting BERTopic + EVoC...")
             topics, probs = bertopic_model.fit_transform(docs, embeddings=embeddings)
             self.logger.info("BERTopic fit complete.")
@@ -280,11 +157,7 @@ class Step3Worker:
                     if topic_infos else 0,
                 "embedding_model": self.cfg_models.get("embedding", ""),
                 "naming_mode": self.naming_mode,
-                "naming_llm": (self.cfg_models.get("llm_agent") or "not recorded")
-                    if self.naming_mode == "agent" else self.cfg_models.get("llm_extraction", ""),
-                "reproducibility": self._reproducibility_info(),
             }
-            self.logger.info(f"Step 3 reproducibility: {stats['reproducibility']}")
 
             self._update_state_status(
                 "completed",
@@ -361,7 +234,6 @@ class Step3Worker:
 
     def _build_models(self):
         """Build embedding model, BERTopic, and representation model."""
-        from sentence_transformers import SentenceTransformer
         from bertopic import BERTopic
         from bertopic.representation import OpenAI as BERTopicOpenAI
         from bertopic.representation import KeyBERTInspired
@@ -378,37 +250,17 @@ class Step3Worker:
         embedding_prompt = self.cfg_bertopic.get("embedding_prompt") or None
 
         self.logger.info(f"Loading embedding model: {embedding_model_name}")
-        # Use CPU for embeddings to avoid OOM when vLLM is using the GPU
-        device = self.cfg_bertopic.get("embedding_device", "cpu")
-        self.logger.info(f"Embedding device set to: {device}")
-        if device != "cpu":
-            self.logger.warning(
-                f"embedding_device='{device}' is not CPU: embedding vectors may vary between "
-                "runs/hardware (non-deterministic GPU kernels), so outputs may not be identical "
-                "even with a fixed seed."
-            )
         if embedding_prompt:
             self.logger.info("Using custom embedding prompt from config.")
-            embedding_model = SentenceTransformer(
-                embedding_model_name,
-                prompts={"encode": embedding_prompt},
-                default_prompt_name="encode",
-                device=device,
-            )
-        else:
-            embedding_model = SentenceTransformer(
-                embedding_model_name,
-                device=device,
-            )
+        # Remote server (embedding_server.enabled) or local SentenceTransformer
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import build_embedding_model
+        embedding_model = build_embedding_model(
+            self.config, self.logger, prompt=embedding_prompt)
 
-        # EVoC clustering model (random_state guarded by inspect.signature inside
-        # _build_evoc_kwargs — warns instead of working around an unsupported arg).
-        self._seed_everything()
-        evoc_kwargs = self._build_evoc_kwargs()
-        self.logger.info(f"Building EVoC with kwargs: {evoc_kwargs}")
-        evoc_model = evoc.EVoC(**evoc_kwargs)
-        self._evoc_params = self._collect_evoc_params(evoc_model)
-        self.logger.info(f"EVoC effective parameters: {self._evoc_params}")
+        # EVoC clustering model
+        noise_level = self.cfg_bertopic.get("evoc_noise_level", 0.12)
+        evoc_model = evoc.EVoC(noise_level=noise_level, random_state=self.cfg_bertopic.get("evoc_random_state", 42))   # same seed + same embeddings => same layers
 
         # Dimensionality reduction — disabled (EVoC handles it internally)
         umap_model = BaseDimensionalityReduction()
@@ -449,9 +301,11 @@ class Step3Worker:
                 chat=True,
                 nr_docs=nr_docs,
                 diversity=0.3,
+                # A few abstracts have thousands of words and overflow the LLM
+                # context window; truncate each document sent to the LLM.
+                doc_length=self.cfg_bertopic.get("llm_doc_length", 250),
+                tokenizer="whitespace",
                 prompt=self._build_topic_naming_prompt(),
-                # Reproducibility: greedy decoding + fixed seed for the labelling call
-                generator_kwargs={"temperature": 0.0, "seed": self.seed},
             )
 
             representation_model = {
@@ -544,7 +398,6 @@ topic: <topic_label>"""
             f"Computing embeddings for {len(docs)} documents "
             f"(model: {self.cfg_models.get('embedding', '')})..."
         )
-        self._seed_everything()
         embeddings = embedding_model.encode(docs, show_progress_bar=True)
 
         # Save with metadata
@@ -559,9 +412,12 @@ topic: <topic_label>"""
 
     def _embedding_checksum(self) -> str:
         """Checksum of embedding parameters to detect config changes."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import embedding_backend_id
         params = {
             "model": self.cfg_models.get("embedding", ""),
             "prompt": self.cfg_bertopic.get("embedding_prompt") or "",
+            "backend": embedding_backend_id(self.config),
         }
         return hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()
 
@@ -597,20 +453,18 @@ topic: <topic_label>"""
                 continue
 
             # Reassign noise points (-1) via cosine similarity to nearest centroid
-            noise_mask = current_topics == -1
-            n_noise = int(noise_mask.sum())
-            if n_topics > 0 and n_noise > 0:
-                # Centroids from non-noise documents only, using the REAL topic ids
-                # (robust to non-contiguous ids and to layers with no -1).
-                topic_ids = np.array(sorted(t for t in set(current_topics.tolist()) if t != -1))
+            if n_topics > 0:
+                topics_range = range(len(set(current_topics)) - 1)
                 topic_embeddings = np.array([
-                    embeddings[current_topics == t].mean(axis=0) for t in topic_ids
+                    embeddings[current_topics == t].mean(axis=0)
+                    for t in topics_range
+                    if (current_topics == t).any()
                 ])
-                similarity = cosine_similarity(embeddings[noise_mask], topic_embeddings)
-                current_topics[noise_mask] = topic_ids[similarity.argmax(axis=1)]
-            self.logger.info(
-                f"  Noise points reassigned to nearest centroid: {n_noise} "
-                f"({n_noise / max(len(current_topics), 1):.1%})")
+                if len(topic_embeddings) > 0:
+                    similarity = cosine_similarity(embeddings, topic_embeddings)
+                    new_topics = similarity.argmax(axis=1)
+                    noise_mask = current_topics == -1
+                    current_topics[noise_mask] = new_topics[noise_mask]
 
             # Update BERTopic representation for this layer
             bertopic_model.update_topics(
@@ -732,8 +586,7 @@ Example:
             response = client.chat.completions.create(
                 model=llm_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                seed=self.seed,
+                temperature=0.1,
                 max_tokens=self.cfg_vllm.get("max_tokens", 512),
             )
             output = response.choices[0].message.content
@@ -839,12 +692,18 @@ Example:
         """Save BERTopic model artifacts."""
         model_dir = self.workspace / "data" / "checkpoints" / "step3_bertopic_model"
         model_dir.mkdir(parents=True, exist_ok=True)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from remote_embedder import RemoteEmbedder
+        # A remote embedder cannot be serialized: store only the model name
+        # (callers pass the embedder again to BERTopic.load).
+        save_emb = (self.cfg_models.get("embedding", "")
+                    if isinstance(embedding_model, RemoteEmbedder) else embedding_model)
         try:
             bertopic_model.save(
                 str(model_dir),
                 serialization="safetensors",
                 save_ctfidf=True,
-                save_embedding_model=embedding_model,
+                save_embedding_model=save_emb,
             )
             self.logger.info(f"BERTopic model saved to {model_dir}")
         except Exception as e:

@@ -205,6 +205,17 @@ class AuditFramework:
                 sample = self.export_audit_sample(df, sample_size, columns)
 
                 out_path = self.review_dir / f"step8_audit_{name}.xlsx"
+                if out_path.exists():
+                    # never overwrite a sample the specialist has already (partly) reviewed
+                    try:
+                        prev = pd.read_excel(out_path, keep_default_na=False, na_values=[""])
+                        gold = cfg.get("gold_col", "audit_label")
+                        if gold in prev.columns and prev[gold].notna().any():
+                            self.logger.info(f"Audit '{name}': {out_path.name} already has reviewed labels; keeping it (delete the file to resample).")
+                            results[name] = {"file": str(out_path), "rows": int(len(prev)), "preserved": True}
+                            continue
+                    except Exception as e:
+                        self.logger.warning(f"Audit '{name}': could not inspect existing file ({e}); it will be overwritten.")
                 sample.to_excel(out_path, index=False, engine="openpyxl")
                 self.logger.info(f"Audit '{name}': exported {len(sample)} rows to {out_path}")
                 results[name] = {"file": str(out_path), "rows": int(len(sample))}
@@ -324,7 +335,8 @@ class AuditFramework:
                 continue
 
             try:
-                df = pd.read_excel(review_file)
+                # keep_default_na=False: the gold label "None" (no extraction expected) must not be read as blank
+                df = pd.read_excel(review_file, keep_default_na=False, na_values=[""])
                 pred_col = cfg.get("predicted_col", "micro_label")
                 gold_col = cfg.get("gold_col", "audit_label")
                 metrics = self.compute_audit_metrics(df, pred_col, gold_col)
@@ -375,8 +387,8 @@ class AuditFramework:
             if cm:
                 labels = cm["labels"]
                 matrix = cm["matrix"]
-                md.append("\n### Confusion matrix (rows: gold label; columns: predicted label)\n")
-                header = "| gold \\ predicted | " + " | ".join(labels) + " |"
+                md.append("\n### Confusion matrix (predicted → gold)\n")
+                header = "| predicted \\ gold | " + " | ".join(labels) + " |"
                 sep = "|---|" + "---|" * len(labels)
                 md.append(header)
                 md.append(sep)

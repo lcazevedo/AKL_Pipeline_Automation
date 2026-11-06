@@ -2,13 +2,12 @@
   "version": 1,
   "workspace": {
     "name": "Openwork_AKL",
+    "createdAt": 1782480474314,
     "preset": "starter"
   },
   "authorizedRoots": [
-    "."
+    "/home/lcazevedo/Documents/Doutorado/Openwork_AKL"
   ],
   "reload": null,
-  "instructions": [
-    "AGENTS.md"
-  ]
+  "instructions": ["AGENTS.md"],
 }

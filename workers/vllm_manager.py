@@ -47,10 +47,6 @@ class VLLMManager:
             "--gpu-memory-utilization", str(server_cfg['gpu_memory_utilization'])
         ]
 
-        # Reproducibility: server-side default seed (per-request 'seed' still applies)
-        seed = self.config.get('reproducibility', {}).get('seed', server_cfg.get('seed', 42))
-        cmd += ["--seed", str(int(seed))]
-
         if server_cfg.get('enforce_eager', False):
             cmd.append("--enforce-eager")
 

@@ -17,8 +17,6 @@ Responsibilities:
 import sys
 import json
 import logging
-import os
-import random
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -59,50 +57,19 @@ class Step5Worker:
         self.base_model = self.config.get("models", {}).get("setfit_base", "sentence-transformers/paraphrase-mpnet-base-v2")
         self.num_epochs = self.setfit_cfg.get("num_epochs", 1)
         self.batch_size = self.setfit_cfg.get("batch_size", 16)
+        # Contrastive pair generation: "oversampling"/"undersampling" draw num_iterations
+        # pairs per sample; "unique" enumerates ALL unique pairs (combinatorial cost).
+        self.num_iterations = self.setfit_cfg.get("num_iterations", 20)
+        self.sampling_strategy = self.setfit_cfg.get("sampling_strategy", "oversampling")
+        # Classification head: sklearn LogisticRegression class_weight (None | "balanced")
+        self.class_weight = self.setfit_cfg.get("class_weight") or None
+        # P(yes) cut-off for the relevant/not-relevant decision (0.5 = SetFit default)
+        self.decision_threshold = float(self.setfit_cfg.get("decision_threshold", 0.5))
         self.min_samples = self.setfit_cfg.get("min_samples_per_class", 8)
-        # Audit-driven options (Phase 2)
+        # Audit-driven options (Fase 2)
         self.group_by_topic = self.setfit_cfg.get("group_by_topic", True)   # GroupShuffleSplit keeps Step-3 topics together
         self.retention_check = self.setfit_cfg.get("retention_check", True) # verify the model retains the expert's Step-4 labels
         self.save_proba_yes = self.setfit_cfg.get("save_proba_yes", True)   # save P(yes) for the Step-8 boundary audit
-
-        # Reproducibility: step-level seed defaults to the global seed.
-        self.cfg_repro = self.config.get("reproducibility", {}) or {}
-        self.global_seed = self.cfg_repro.get("seed", 42)
-        self.seed = self._resolve_seed(self.setfit_cfg.get("seed"))
-        self.logger.info(f"Random seed: {self.seed}")
-
-    def _resolve_seed(self, value):
-        """Resolve a step-level seed. `None` inherits the global seed."""
-        if value is None:
-            value = self.global_seed
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 42
-
-    def _apply_seed(self):
-        """Seed Python, NumPy, Torch, HuggingFace and SetFit before training."""
-        os.environ.setdefault("PYTHONHASHSEED", str(self.seed))
-        random.seed(self.seed)
-        np.random.seed(self.seed)
-        try:
-            import torch
-            torch.manual_seed(self.seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self.seed)
-        except Exception:
-            pass
-        try:
-            from transformers import set_seed as _hf_set_seed
-            _hf_set_seed(self.seed)
-        except Exception:
-            pass
-        try:
-            import setfit
-            if hasattr(setfit, "set_seed"):
-                setfit.set_seed(self.seed)
-        except Exception:
-            pass
 
     @staticmethod
     def _build_text(title, abstract):
@@ -133,7 +100,47 @@ class Step5Worker:
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump(self.state, f, indent=2, ensure_ascii=False)
 
+    def _predict_with_threshold(self, model, texts):
+        """Return (labels, P(yes)) with label 'yes' when P(yes) >= decision_threshold."""
+        probas = model.predict_proba(list(texts))
+        probas = probas.cpu().numpy() if hasattr(probas, "cpu") else np.array(probas)
+        classes = [str(c) for c in model.model_head.classes_]
+        p_yes = probas[:, classes.index("yes")]
+        labels = np.where(p_yes >= self.decision_threshold, "yes", "no")
+        return labels, p_yes
+
+    def _load_labels_from_file(self, labels_file):
+        """Labels imported in Step 4 (doi, label, source). The group for the grouped split is the document's
+        topic in THIS run's Step 3 (so labels from a previous run can be reused with new topics)."""
+        df = pd.read_csv(labels_file)
+        df["doi"] = df["doi"].astype(str).str.lower().str.strip().str.replace("https://doi.org/", "", regex=False)
+        df["label"] = df["label"].astype(str).str.lower().str.strip()
+        df = df[df["label"].isin(["yes", "no"])]
+        sources = self.setfit_cfg.get("labels_sources") or self.config.get("step4_curation", {}).get("import_labels_sources")
+        if sources and "source" in df.columns:
+            df = df[df["source"].isin(sources)]
+        step3 = self.state["steps"].get("3", {})
+        cwt = step3.get("output", {}).get("corpus_with_topics")
+        best = step3.get("params_used", {}).get("best_layer")
+        corpus = pd.read_pickle(self.workspace / cwt) if cwt else None
+        if corpus is None or best is None or f"topic_layer_{best}" not in corpus.columns:
+            raise RuntimeError("Step 3 corpus with topics (and best_layer) are needed to group the imported labels.")
+        corpus = corpus.copy()
+        corpus["doi_n"] = corpus["doi"].astype(str).str.lower().str.strip().str.replace("https://doi.org/", "", regex=False)
+        corpus = corpus.drop_duplicates("doi_n")
+        m = df.merge(corpus[["doi_n", "title", "abstract", f"topic_layer_{best}"]], left_on="doi", right_on="doi_n", how="inner")
+        if len(m) < len(df):
+            self.logger.warning(f"{len(df) - len(m)} imported labels have no document in the corpus and were dropped.")
+        m["group"] = m[f"topic_layer_{best}"].astype(str)
+        m["text"] = self._build_text(m["title"], m["abstract"])
+        self.logger.info(f"Loaded {len(m)} imported labels from {labels_file} "
+                         f"(Yes: {(m['label'] == 'yes').sum()}, No: {(m['label'] == 'no').sum()}); sources: {sorted(set(df.get('source', ['imported'])))}")
+        return m[["text", "label", "group"]].reset_index(drop=True)
+
     def _load_labeled_data(self):
+        labels_file = self.setfit_cfg.get("labels_file") or self.state["steps"].get("4", {}).get("output", {}).get("labels_file")
+        if labels_file:
+            return self._load_labels_from_file(Path(labels_file))
         review_file = Path(self.state["steps"]["4"]["output"]["review_file"])
         if not review_file.exists():
             raise FileNotFoundError(f"Review file not found: {review_file}")
@@ -185,7 +192,6 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 ## Summary Metrics
 - **Global Accuracy**: {acc:.4f}
 - **Macro F1-Score**: {macro_f1:.4f}
-- **Random seed**: {self.seed}
 
 ## Classification Report
 ```text
@@ -226,7 +232,7 @@ You can sort the Excel files by this column to review the documents the AI strug
             # Step-3 topic (group) never appear in both train and test, preventing
             # topic-level leakage and giving a more honest generalization estimate.
             if self.group_by_topic and "group" in df_labeled.columns:
-                gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=self.seed)
+                gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=int(self.setfit_cfg.get('seed', 42)))
                 train_idx, test_idx = next(gss.split(df_labeled, df_labeled["label"], groups=df_labeled["group"]))
                 df_train = df_labeled.iloc[train_idx].reset_index(drop=True)
                 df_test = df_labeled.iloc[test_idx].reset_index(drop=True)
@@ -238,7 +244,7 @@ You can sort the Excel files by this column to review the documents the AI strug
                 )
             else:
                 from sklearn.model_selection import train_test_split
-                df_train, df_test = train_test_split(df_labeled, test_size=0.2, random_state=self.seed, stratify=df_labeled["label"])
+                df_train, df_test = train_test_split(df_labeled, test_size=0.2, random_state=42, stratify=df_labeled["label"])
                 self.logger.info("Plain train_test_split used (group_by_topic disabled).")
             
             ds = DatasetDict({
@@ -248,21 +254,27 @@ You can sort the Excel files by this column to review the documents the AI strug
             
             # 3. Train Model
             self.logger.info(f"Loading base model: {self.base_model}")
-            self._apply_seed()
-            model = SetFitModel.from_pretrained(self.base_model)
-
-            import inspect
-            args_kwargs = {"batch_size": self.batch_size, "num_epochs": self.num_epochs}
-            if "seed" in inspect.signature(TrainingArguments.__init__).parameters:
-                args_kwargs["seed"] = self.seed
+            if self.class_weight:
+                model = SetFitModel.from_pretrained(
+                    self.base_model, head_params={"class_weight": self.class_weight})
             else:
-                self.logger.warning(
-                    "Installed setfit TrainingArguments does not accept 'seed': "
-                    "model training may not be fully reproducible."
-                )
-            args = TrainingArguments(**args_kwargs)
-            self.logger.info(f"TrainingArguments: {args_kwargs}")
-
+                model = SetFitModel.from_pretrained(self.base_model)
+            self.logger.info(f"Head: class_weight={self.class_weight}, "
+                             f"decision_threshold={self.decision_threshold}")
+            
+            self.logger.info(f"Pair sampling: strategy={self.sampling_strategy}, "
+                             f"num_iterations={self.num_iterations}")
+            import inspect
+            from transformers import set_seed
+            seed = int(self.setfit_cfg.get("seed", 42))
+            set_seed(seed)   # python, numpy and torch (training is only approximately reproducible on GPU)
+            targs = dict(batch_size=self.batch_size, num_epochs=self.num_epochs,
+                         num_iterations=self.num_iterations, sampling_strategy=self.sampling_strategy)
+            if "seed" in inspect.signature(TrainingArguments).parameters:
+                targs["seed"] = seed
+            args = TrainingArguments(**targs)
+            self.logger.info(f"Seed: {seed}")
+            
             trainer = Trainer(
                 model=model,
                 args=args,
@@ -275,19 +287,27 @@ You can sort the Excel files by this column to review the documents the AI strug
             
             # 4. Evaluate
             self.logger.info("Evaluating model...")
-            pred_labels = model.predict(ds["eval"]["text"])
+            pred_labels, _ = self._predict_with_threshold(model, ds["eval"]["text"])
             
             report_path = self.workspace / "data" / "04_reports" / "step5_setfit_report.md"
             report_path.parent.mkdir(parents=True, exist_ok=True)
             acc, f1 = self._generate_report(ds["eval"]["label"], pred_labels, report_path)
             self.logger.info(f"Model evaluated. Accuracy: {acc:.2f}, F1: {f1:.2f}")
+            with open(report_path, "a", encoding="utf-8") as f:
+                f.write(f"""
+## Settings
+- Base model: `{self.base_model}`
+- Epochs: {self.num_epochs} | batch size: {self.batch_size} | num_iterations: {self.num_iterations} ({self.sampling_strategy})
+- Head class_weight: `{self.class_weight}`
+- Decision threshold on P(yes): **{self.decision_threshold}**
+""")
             
             # 4b. Retention check (reviewer validation #4): apply the model to ALL
             # Step-4 labeled documents and verify it retains the expert's labels.
             retention_acc = None
             if self.retention_check:
                 self.logger.info(f"Retention check: applying model to all {len(df_labeled)} Step-4 labeled documents...")
-                ret_preds = model.predict(df_labeled["text"].tolist())
+                ret_preds, _ = self._predict_with_threshold(model, df_labeled["text"].tolist())
                 from sklearn.metrics import accuracy_score as _acc
                 retention_acc = float(_acc(df_labeled["label"], ret_preds))
                 self.logger.info(f"Retention accuracy on {len(df_labeled)} labeled docs: {retention_acc:.4f}")
@@ -321,27 +341,20 @@ test split or label noise; investigate before trusting the corpus filter.
             self.logger.info(f"Applying model to full corpus ({n_before} records)...")
             pred_texts = self._build_text(df_corpus["title"], df_corpus["abstract"])
             
-            # Predictions
-            full_preds = model.predict(pred_texts.tolist())
-            
-            # Probabilities to extract Confidence
-            probas = model.predict_proba(pred_texts.tolist())
-            if hasattr(probas, "cpu"):
-                probas = probas.cpu().numpy()
-            else:
-                probas = np.array(probas)
-            confidences = np.max(probas, axis=1)
-            
+            # Predictions: yes when P(yes) >= decision_threshold (default 0.5)
+            full_preds, p_yes = self._predict_with_threshold(model, pred_texts.tolist())
+
+            # AI_Confidence = certainty of the more likely class (0.5 .. 1.0)
+            confidences = np.maximum(p_yes, 1.0 - p_yes)
+
             df_corpus["predicted_relevance"] = full_preds
             df_corpus["AI_Confidence"] = confidences
-            
+
             # Probability of the "yes" class (reviewer validation #2 prerequisite):
             # needed by the Step-8 boundary audit to find documents the model is
-            # unsure about (confidence near 0.5). Robust to class ordering.
-            if self.save_proba_yes and probas.shape[1] == 2:
-                df_corpus["proba_yes"] = np.where(
-                    np.array(full_preds) == "yes", confidences, 1.0 - confidences
-                )
+            # unsure about. Taken directly from the classifier, independent of the threshold.
+            if self.save_proba_yes:
+                df_corpus["proba_yes"] = p_yes
                 self.logger.info("Saved 'proba_yes' column for the Step-8 boundary audit.")
             else:
                 df_corpus["proba_yes"] = np.nan
@@ -391,7 +404,6 @@ test split or label noise; investigate before trusting the corpus filter.
                 },
                 params={
                     "setfit_base_model": self.base_model,
-                    "seed": self.seed,
                     "accuracy": acc,
                     "f1_score": f1,
                     "retention_accuracy": retention_acc,

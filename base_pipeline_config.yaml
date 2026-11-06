@@ -2,91 +2,80 @@
 # AKL pipeline technical configurations
 # Modify here and restart the affected step to apply
 
-# ── Reproducibility ─────────────────────────────────
-# Global random seed. Every step-level `random_state` / `seed` key defaults to
-# this value when it is absent or null, so a single change here propagates to
-# Steps 3, 5, 6 and 7.
-# IMPORTANT: reproducibility also requires fixed dependency versions.
-# See `reproducibility.lock` and the pinned requirements files.
-reproducibility:
-  seed: 42
-
-# ── Analysis reference date ─────────────────────────
-# Time-dependent indicators (document age, citations per year, "recent years"
-# window, growth models) are computed relative to this date instead of today's
-# date, so re-running a step later gives the same result. Use the date on which
-# the bibliographic data were retrieved. null = completion date of Step 1.
-analysis:
-  reference_date: null
-
 # ── Models ──────────────────────────────────────────
 models:
   embedding: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
   #llm_extraction: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # Dev model
   llm_extraction: "RedHatAI/gemma-3-4b-it-quantized.w8a8" # Test Model
-  llm_agent: ""                    # name of the model running the orchestrator (as shown in OpenWork); recorded in the state when the agent names topics or pre-labels
+  llm_agent: "claude-sonnet-4-6"           # documentation only (no worker reads it): record the orchestrator model you actually used
   setfit_base: "all-MiniLM-L6-v2"   # "sentence-transformers/paraphrase-mpnet-base-v2"
 
+# ── Remote embedding server (OpenAI-compatible, e.g. vLLM --runner pooling) ─────────────
+# Steps 3 and 6 can embed on a GPU server instead of the local machine. The model must match models.embedding.
+embedding_server:
+  enabled: false
+  base_url: "http://localhost:8001/v1"
+  model: "BAAI/bge-base-en-v1.5"
+  batch_size: 64
+  max_tokens: 512        # per-text truncation; must be <= the server's max_model_len
+  timeout: 120
 
-# ── Step 1 — OpenAlex acquisition ────────────────────
-# Filters are applied via the OpenAlex `filter` parameter.
-# The special key "title_and_abstract.search" restricts the search to
-# title + abstract (variant D). Leave `filters: {}` to fall back to the
-# full-text `search` parameter passed via --query.
-step1_openalex:
-  filters: {}
-    # Example (replace with your own query):
-    # "title_and_abstract.search": '("term A" OR "term B") AND ("term C" OR "term D")'
-    # type: "article"
-    # has_doi: "true"
-    # from_publication_date: "YYYY-MM-DD"
-    # to_publication_date: "YYYY-MM-DD"
+
+# ── OpenAlex enrichment (workers/step1b_openalex_enrichment.py) ──────────────────────
+# One pass over the DOIs: citations per year, FWCI, retraction flag, references, funders, OA status, primary topic.
+# The API key is read from OPENALEX_API_KEY (environment or .env).
+enrichment_openalex:
+  enabled: true
+  corpus_file: "data/02_intermediate/step5_corpus_filtered_relevant.pkl"   # falls back to the Step 2 clean corpus
+  batch_size: 50           # DOIs per request (OpenAlex maximum for the OR filter)
+  workers: 4               # parallel requests
+  save_every_batches: 40   # cache checkpoint
 
 # ── Step 2 — Cleaning ───────────────────────────────
 step2_cleaning:
   required_fields: []   # ex: ["source_journal", "doi"]
-  detect_language: true          # fill 'language' from title+abstract content (langdetect)
-  language_filter: ""            # remove records whose language != this value ("" = keep all)
-  year_min: null                 # analysis window start (inclusive); null = no lower bound
-  year_max: null                 # analysis window end (inclusive); null = no upper bound
+  year_min: null        # analysis window; null = no limit
+  year_max: null        # use the last COMPLETE year when the current one is partial
+  language_filter: ["en"]   # keep only these languages; on title/abstract disagreement the abstract language wins
+  detect_language: true
 
 # ── Step 3 — BERTopic ───────────────────────────────
 step3_bertopic:
+  evoc_random_state: 42      # EVoC seed (same seed + same embeddings => same layers)
   min_topic_size: 10
   nr_topics: "auto"
   embedding_prompt: null  # null = no prompt; string = domain-specific prompt
-  embedding_device: "cpu"   # "cpu" or "cuda". Use "cpu" for reproducible runs (GPU kernels may vary
-                            # between runs/hardware); "cuda" is faster but embeddings may differ slightly.
-  min_df: 2  # CountVectorizer min_df; lower it for very small corpora
-  llm_nr_docs: 2  # documents per topic sent to the LLM; keep low when max_model_len is 2048
-  # --- Reproducibility ---
-  random_state: null      # null = inherit reproducibility.seed; passed to evoc.EVoC(random_state=...)
-  max_layers: 10          # EVoC max hierarchical layers (package default: 10)
-  min_similarity_threshold: 0.2  # EVoC merge threshold (package default: 0.2)
-  # Deprecated (ignored; kept only for backwards compatibility):
-  #   min_num_clusters, next_cluster_size_quantile — emit a warning if present.
+  embedding_device: "gpu"  # "cpu" or "cuda"; use CPU to save GPU for vLLM
+  min_df: 2  # reduced for small corpus (32 docs)
+  llm_nr_docs: 2  # documents per topic sent to the LLM; reduced due to 2048 token limit
+  llm_doc_length: 250   # words per document in the naming prompt (keeps it under the server context)
+
+# ── Step 4 — Curation ───────────────────────────────
+step4_curation:
+  sample_size: 240   # documents sampled for specialist validation (split across topics)
 
 # ── Step 5 — SetFit ─────────────────────────────────
 step5_setfit:
   num_epochs: 1
   min_samples_per_class: 8   # warns if a class has fewer than this
   batch_size: 16
-  group_by_topic: true       # GroupShuffleSplit: keep Step-3 topics together in train/test (no topic leakage)
-  retention_check: true      # re-apply model to all Step-4 labels and report retention accuracy
-  save_proba_yes: true       # save P(yes) column for the Step-8 boundary audit
-  seed: null                 # null = inherit reproducibility.seed (splits, Trainer/TrainingArguments seed)
+  num_iterations: 10             # contrastive pairs per example (20 = SetFit default; lower = much faster)
+  sampling_strategy: "oversampling"
+  class_weight: "balanced"       # head class weights, helps when "no" is scarce
+  decision_threshold: 0.5        # P(yes) cut-off
+  group_by_topic: true           # grouped split: no topic leakage between train and test
+  retention_check: true          # re-apply the model to all labelled documents
+  save_proba_yes: true           # keep P(yes) for the Step 8 boundary audit
 
-# ── Step 6 — EVoC ───────────────────────────────────
+# ── Step 6 — EVOC ───────────────────────────────────
 step6_evoc:
   min_cluster_size: 5
   metric: "cosine"
-  min_df: 1   # must be <= number of topics in the first EVoC layer
-  # --- Reproducibility ---
-  random_state: null      # null = inherit reproducibility.seed; passed to evoc.EVoC(random_state=...)
-  max_layers: 10          # EVoC max hierarchical layers (package default: 10)
-  min_similarity_threshold: 0.2  # EVoC merge threshold (package default: 0.2)
-  # Deprecated (ignored; kept only for backwards compatibility):
-  #   min_num_clusters, next_cluster_size_quantile — emit a warning if present.
+  min_df: 1                      # must be <= number of topics in the first EVoC layer
+  evoc_random_state: 42          # seed: same seed + same embeddings => same layers
+  max_topics_to_name: 100        # layers with more topics get CVI/Kneedle metrics but no LLM names
+  reuse_step3_embeddings: true   # reuse Step 3 vectors when model/backend/text are identical
+  llm_doc_length: 250
 
 # ── Step 7 — Semantic extraction ─────────────────────
 step7_extraction:
@@ -99,23 +88,38 @@ step7_extraction:
     - name: "controversies"
       prompt: "Identify any controversies or disagreements described in this text fragment: {text}"
   # To add a new vector, copy the block above and adjust name and prompt
+  # NOTE: the vectors actually used are the active rows of the table in Section 7 of project_config.md.
+  max_abstract_words: 350        # truncation so the prompt fits the server max_model_len
+  sentence_prefilter:            # cue-word filter before the LLM (cheap, but loses recall: measure it with the pilot)
+    enabled: false
+    cues: [limit, challeng, however, despite, lack, future, further, promising]
+  sentence_classifier:           # supervised sentence classifier as a precision filter (workers/step7_sentence_filter.py)
+    enabled: false
+    model_dir: "data/checkpoints/sentence_classifier"
+    threshold: 0.5
+    batch_size: 64
+    max_length: 128
+    vectors: {challenges: Challenge, directions: Direction}
+  sentence_verifier:             # LLM yes/no verifier as a precision filter (workers/step7_sentence_verifier.py)
+    enabled: false               # recommended after auditing the sentence-level vectors
+    base_urls: []                # empty = step7_vllm.base_url; list several to split the load
+    thresholds: {challenges: 0.2, directions: 0.5}
+    concurrency: 24
+    checkpoint_every: 4000
 
 # ── Step 7 — vLLM server ────────────────────────────
 step7_vllm:
-  base_url: "http://localhost:8000/v1"  # change if the vLLM server is remote
+  base_url: "http://localhost:8000/v1"  # address of your vLLM server (local machine by default)
+  # base_urls: ["http://host1:8000/v1", "http://host2:8000/v1"]   # optional: split calls across replicas; unreachable ones are skipped
   max_tokens: 512
-  temperature: 0.0
+  temperature: 0.1
   batch_size: 32             # adjust according to available VRAM
-  # --- Reproducibility ---
-  seed: null                 # null = inherit reproducibility.seed; sent to vLLM (extra_body seed)
-  # NOTE: even with a fixed seed, vLLM batched decoding may not be bit-identical
-  # across runs, so the LLM text output is not guaranteed to be deterministic.
   
   # -- Server configuration (Docker Container) --
   server:
     port: 8000
     max_model_len: 2048
-    dtype: "bfloat16"        # Gemma 3 requires bfloat16 or "half" for GPU GTX 1650
+    dtype: "bfloat16"        # Gemma 3 requires bfloat16 or "half" (for example, on older GPUs)
     gpu_memory_utilization: 0.8
     enforce_eager: true           # true to save VRAM during the start
     # port: 8000
@@ -126,6 +130,7 @@ step7_vllm:
 
 # ── Step 9 — Visualizations ──────────────────────────
 step9_output:
+  last_complete_year: 2025   # time series stop here (the current year is partial)
   figures_format: "png"
   figures_dpi: 150
   include_standard: true    # always generates the standard set of visualizations
@@ -147,7 +152,7 @@ audits:
     gold_col: "audit_label"          # column the specialist fills during review
     description: "Audit of challenge micro-label extractions (sentence level)"
   directions_micro:
-    enabled: false
+    enabled: true
     sample_size: 100
     source: "step7_extractions"
     filter_vector: "directions"
@@ -193,6 +198,7 @@ schema:
   title: "title"
   abstract: "abstract"
   year: "year"
+  publication_date: "publication_date"     # ISO YYYY-MM-DD (enables month-level filtering)
   language: "language"
   document_type: "document_type"
 
@@ -219,7 +225,6 @@ schema:
   last_country_region: "last_country_region"   # always derived from the country
 
   # Publication
-  publication_date: "publication_date"           # ISO YYYY-MM-DD (enables month-level filtering)
   source_journal: "source_journal"
   journal_if: "journal_if"                     # impact factor
   jnif: "jnif"                                 # always calculated (normalized)

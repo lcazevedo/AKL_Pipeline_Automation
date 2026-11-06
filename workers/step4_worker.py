@@ -37,11 +37,13 @@ class Step4Worker:
         self.workspace = Path(self.state.get("project", {}).get("workspace_path", "."))
         self.logger = _setup_logger()
 
-    def _update_state(self, status, output_file=None, params=None, validation=None):
+    def _update_state(self, status, output_file=None, params=None, validation=None, extra_output=None):
         step = self.state.setdefault("steps", {}).setdefault("4", {})
         step["status"] = status
         if output_file:
             step.setdefault("output", {})["review_file"] = str(output_file)
+        if extra_output:
+            step.setdefault("output", {}).update(extra_output)
         if params:
             step.setdefault("params_used", {}).update(params)
         if validation:
@@ -74,17 +76,13 @@ class Step4Worker:
         if not topic_sheets: 
             raise ValueError("No topic sheets found in Step 3 output.")
 
-        samples_per_sheet = max(3, 60 // len(topic_sheets))
+        sample_size = int(self.config.get("step4_curation", {}).get("sample_size", 60))
+        samples_per_sheet = max(3, sample_size // len(topic_sheets))
+        self.logger.info(f"Sampling {samples_per_sheet} documents from each of "
+                         f"{len(topic_sheets)} topic sheets (target ~{sample_size}).")
         
         # Setup vLLM client
         vllm_cfg = self.config.get("step7_vllm", {})
-        cfg_repro = self.config.get("reproducibility", {}) or {}
-        global_seed = cfg_repro.get("seed", 42)
-        seed = vllm_cfg.get("seed", global_seed)
-        try:
-            seed = int(seed)
-        except (TypeError, ValueError):
-            seed = 42
         base_url = vllm_cfg.get("base_url", "http://localhost:8000/v1")
         llm_model = self.config.get("models", {}).get("llm_extraction", "gemma-3-4b-instruct")
         client = openai.OpenAI(api_key="not-needed", base_url=base_url)
@@ -107,13 +105,14 @@ class Step4Worker:
 
             # Sample indices that are empty
             empty_idx = df[df[col_rel].isna() | (df[col_rel] == "")].index.tolist()
-            # Seeded local RNG: the sampled records are reproducible for a given seed
-            rng = random.Random(seed)
-            sample_idx = rng.sample(sorted(empty_idx), min(len(empty_idx), samples_per_sheet))
+            sample_idx = random.sample(empty_idx, min(len(empty_idx), samples_per_sheet))
 
             for idx in sample_idx:
                 title = df.at[idx, "title"]
                 abstract = df.at[idx, "abstract"]
+                # Some abstracts have thousands of words and would overflow the LLM
+                # context window; only the prompt copy is truncated (the sheet is intact).
+                abstract_prompt = " ".join(str(abstract).split()[:350])
 
                 if llm_mode == "agent":
                     agent_samples.append({
@@ -129,9 +128,9 @@ Based strictly on these project criteria:
 {criteria}
 
 Paper Title: {title}
-Abstract: {abstract}
+Abstract: {abstract_prompt}
 
-Is this paper RELEVANT to the study? 
+Is this paper RELEVANT to the study?
 Reply ONLY with the word "yes" or the word "no". Do not include any other text."""
 
                 try:
@@ -139,7 +138,6 @@ Reply ONLY with the word "yes" or the word "no". Do not include any other text."
                         model=llm_model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.0,
-                        seed=seed,
                         max_tokens=5
                     )
                     ans = resp.choices[0].message.content.strip().lower()
@@ -156,6 +154,10 @@ Reply ONLY with the word "yes" or the word "no". Do not include any other text."
         # Save to review folder
         with pd.ExcelWriter(review_file, engine="openpyxl") as writer:
             for s_name, s_df in sheets.items():
+                # Put the pre-labeled sample rows at the top of each sheet for review
+                if "Relevance (yes/no)" in s_df.columns:
+                    lab = s_df["Relevance (yes/no)"].astype(str).str.strip().str.lower().isin(["yes", "no"])
+                    s_df = pd.concat([s_df[lab], s_df[~lab]]).reset_index(drop=True)
                 s_df.to_excel(writer, sheet_name=s_name, index=False)
 
         if llm_mode == "agent":
@@ -173,7 +175,7 @@ Reply ONLY with the word "yes" or the word "no". Do not include any other text."
             self._update_state(
                 "awaiting_validation", 
                 review_file, 
-                {"suggested_yes": 0, "suggested_no": 0, "llm_mode": "agent", "agent_llm": self.config.get("models", {}).get("llm_agent") or "not recorded"},
+                {"suggested_yes": 0, "suggested_no": 0, "llm_mode": "agent"},
                 validation={"status": "awaiting_validation", "suggested_at": datetime.now().isoformat()}
             )
             return {"review_file": str(review_file), "agent_samples": len(agent_samples),
@@ -235,7 +237,7 @@ Reply ONLY with the word "yes" or the word "no". Do not include any other text."
         self._update_state(
             "awaiting_validation",
             review_file,
-            {"suggested_yes": yes_count, "suggested_no": no_count, "llm_mode": "agent", "agent_llm": self.config.get("models", {}).get("llm_agent") or "not recorded"},
+            {"suggested_yes": yes_count, "suggested_no": no_count, "llm_mode": "agent"},
             validation={"status": "awaiting_validation", "suggested_at": datetime.now().isoformat()}
         )
         return {"review_file": str(review_file), "yes": yes_count, "no": no_count}
@@ -258,6 +260,51 @@ Reply ONLY with the word "yes" or the word "no". Do not include any other text."
         )
         self.logger.info(f"File copied to {review_file}. Awaiting human validation.")
         return {"review_file": str(review_file)}
+
+    def import_labels(self, labels_path=None):
+        """Import document-level relevance labels from a table (doi, label, source, round) instead of
+        sampling and validating again. Use it when a previous run already produced specialist labels:
+        labels are properties of documents and do not depend on the topics of any Step-3 run.
+
+        Config (step4_curation): import_labels_file (default data/03_review/labels_relevance.csv),
+        import_labels_sources (optional list, e.g. ["step4"]; other sources stay available as held-out data).
+        """
+        cfg = self.config.get("step4_curation", {})
+        path = Path(labels_path or cfg.get("import_labels_file", "data/03_review/labels_relevance.csv"))
+        if not path.exists():
+            raise FileNotFoundError(f"Labels file not found: {path}")
+        df = pd.read_csv(path)
+        need = {"doi", "label"}
+        if not need <= set(df.columns):
+            raise ValueError(f"{path} must have the columns {sorted(need)}")
+        df["doi"] = df["doi"].astype(str).str.lower().str.strip().str.replace("https://doi.org/", "", regex=False)
+        df["label"] = df["label"].astype(str).str.lower().str.strip()
+        df = df[df["label"].isin(["yes", "no"])]
+        if "source" not in df.columns:
+            df["source"] = "imported"
+        sources = cfg.get("import_labels_sources")
+        used = df[df["source"].isin(sources)] if sources else df
+        if used.empty:
+            raise ValueError("No labels left after the source filter.")
+        corpus_file = self.state.get("steps", {}).get("2", {}).get("output", {}).get("corpus_file")
+        missing = 0
+        if corpus_file and Path(corpus_file).exists():
+            known = set(pd.read_pickle(corpus_file)["doi"].astype(str).str.lower().str.strip().str.replace("https://doi.org/", "", regex=False))
+            missing = int((~used["doi"].isin(known)).sum())
+            used = used[used["doi"].isin(known)]
+        yes, no = int((used["label"] == "yes").sum()), int((used["label"] == "no").sum())
+        report = self.workspace / "data" / "04_reports" / "step4_imported_labels_report.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        rows = used.groupby(["source", "label"]).size().reset_index(name="n").to_markdown(index=False)
+        held = df[~df.index.isin(used.index)]
+        report.write_text(f"# Step 4: imported labels\n\nFile: `{path}`\n\nUsed for training: **{len(used)}** documents ({yes} relevant, {no} not relevant).\n"
+                          f"Labels whose DOI is not in the Step-2 corpus (dropped): {missing}.\nSources kept out of training (held-out): {len(held)}.\n\n{rows}\n", encoding="utf-8")
+        self._update_state(
+            "completed", params={"relevant_count": yes, "not_relevant_count": no, "llm_mode": "imported"},
+            validation={"status": "completed", "validated_at": datetime.now().isoformat(), "corrections_made": False, "imported_labels": True},
+            extra_output={"labels_file": str(path)})
+        self.logger.info(f"Imported {len(used)} labels ({yes} yes / {no} no); {missing} not in the corpus; {len(held)} held out.")
+        return {"labels_file": str(path), "used": len(used), "yes": yes, "no": no, "not_in_corpus": missing, "held_out": len(held)}
 
     def run_finalize(self):
         self.logger.info("Finalizing validation...")
@@ -295,3 +342,5 @@ if __name__ == "__main__":
         print(json.dumps(worker.apply_suggestions()))
     elif mode == "finalize": 
         print(json.dumps(worker.run_finalize()))
+    elif mode == "import-labels":
+        print(json.dumps(worker.import_labels(sys.argv[2] if len(sys.argv) > 2 else None)))

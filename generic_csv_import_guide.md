@@ -244,7 +244,7 @@ source_mapping:
     doi: "DOI"
     title: "Article Title"
     abstract: "Summary"
-    year: "Publication Year"
+    year: "Pub Year"
     language: ""
     document_type: ""
     citation_count: ""

@@ -265,12 +265,13 @@ class Step2Worker:
         Detect the language of each document from its title and abstract
         content (langdetect) and fill/overwrite the 'language' column.
 
-        Divergence rule (specialist-defined):
+        Divergence rule:
         - If title and abstract agree on a language, use it.
-        - If they diverge and one of them is English, use the NON-English one
-          (conservative: any non-English content flags the document).
-        - If they diverge and neither is English, use the abstract language
-          (more text, more reliable).
+        - If they diverge, use the abstract language (more text, more reliable).
+          Short, upper-case or formula-heavy titles are often misdetected
+          (e.g., English chemistry titles flagged as German or Italian), so a
+          non-English title alone no longer flags an English abstract.
+        - If only one of them could be detected, use it.
         - If detection fails for a record, keep the original 'language' value.
         """
         if not self.detect_language:
@@ -300,15 +301,7 @@ class Step2Worker:
         for _, row in df.iterrows():
             t = _detect(row.get("title", ""))
             a = _detect(row.get("abstract", ""))
-            if t and a and t != a:
-                if t == "en":
-                    lang = a
-                elif a == "en":
-                    lang = t
-                else:
-                    lang = a  # both non-English → abstract (more text)
-            else:
-                lang = t or a
+            lang = a or t  # abstract wins on divergence; fall back to the title
             detected_codes.append(lang)
 
         filled = 0
@@ -323,7 +316,7 @@ class Step2Worker:
         df["language"] = names
 
         self.logger.info(f"Language detection: identified language for {filled} records "
-                         f"(title+abstract, divergence → non-English).")
+                         f"(title+abstract, divergence → abstract language).")
         return df
 
     @staticmethod
@@ -595,7 +588,7 @@ class Step2Worker:
         if self.detect_language:
             lines.append("\n## Language handling\n")
             lines.append("- Language detection: **enabled** (langdetect on title + abstract; "
-                         "on divergence, the non-English language is kept).")
+                         "on divergence, the abstract language is used).")
             if self.language_filter:
                 lines.append(f"- Language filter: keep only records with language = "
                              f"**{self.language_filter}**.")
