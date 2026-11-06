@@ -120,7 +120,7 @@ Long steps write their progress to `execution.log` in the workspace root.
 
 ### Reproducibility
 
-Steps 3 and 6 use EVoC with a fixed seed (`evoc_random_state`). With the same embeddings and seed, the partitions are identical. A different seed changes the number and size of the layers, so the seed is part of the configuration that must be reported.
+Steps 3 and 6 use EVoC with a fixed seed (`evoc_random_state`). With the same embeddings and seed, the partitions are identical. A different seed changes the number and size of the layers, so the seed is part of the configuration that must be reported. The tool `tools/seed_test.py` refits EVoC on the Step 6 embeddings with other seeds and compares the saved layers with a refit using the configured seed.
 
 ---
 
