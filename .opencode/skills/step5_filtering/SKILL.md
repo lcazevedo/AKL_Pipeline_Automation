@@ -24,9 +24,9 @@ cd <workspace_root>
 ./run_worker_setfit.sh workers/step5_worker.py
 ```
 
-### Reviewer-driven behavior (audit framework)
+### Audit safeguards
 
-Since the audit implementation, Step 5 includes three reviewer-driven safeguards (configurable in `pipeline_config.yaml` → `step5_setfit`):
+Since the audit implementation, Step 5 includes three safeguards (configurable in `pipeline_config.yaml` → `step5_setfit`):
 
 1. **GroupShuffleSplit** (`group_by_topic: true`) — the train/test split groups documents by their Step-3 topic, so documents from the same topic never appear in both splits. This prevents topic-level leakage and gives an honest generalization estimate.
 2. **Retention check** (`retention_check: true`) — after training, the model is re-applied to ALL Step-4 labeled documents and the retention accuracy is reported in `step5_setfit_report.md`. A retention accuracy well below eval accuracy indicates overfitting or label noise.

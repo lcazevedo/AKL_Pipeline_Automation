@@ -24,7 +24,7 @@ Use the `cmd_exec` tool to run the data crunching worker:
 `python workers/step8_worker.py run`
 
 The worker now also:
-1. Runs the **automated audits** (reviewer validations #5, #9, #10, #11) and appends them as Section 5 of `step8_data_crunching.md`:
+1. Runs the **automated audits** and appends them as Section 5 of `step8_data_crunching.md`:
    - EVoC sensitivity (pairwise ARI between Step-6 layers)
    - Regression audit (OLS + bootstrap CIs + Kruskal-Wallis + robustness)
    - Growth model fitting (AICc model selection per macro-category)
@@ -81,7 +81,7 @@ files are exported, and point out which `predicted_col` each audit compares
 against (read it from the `audits:` section of `pipeline_config.yaml`).
 
 Notes:
-- The `boundary` audit (reviewer validation #2) samples documents with P(relevant) in [0.40, 0.60] from `step5_full_predictions.pkl`. If that file does not exist yet (Step 5 was not re-run with `save_proba_yes: true`), the audit is skipped gracefully — mention this to the user.
+- The `boundary` audit samples documents with P(relevant) in [0.40, 0.60] from `step5_full_predictions.pkl`. If that file does not exist yet (Step 5 was not re-run with `save_proba_yes: true`), the audit is skipped gracefully — mention this to the user.
 - If no audits are enabled (`enabled: false` for all), skip this phase silently.
 
 ---

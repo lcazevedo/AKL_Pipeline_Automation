@@ -168,8 +168,8 @@ class Step6Worker:
             self._generate_cluster_maps(embeddings, all_topics_per_layer, topic_infos, df)
 
             # 8. Save Model — re-aligned to the selected layer so that the saved
-            # model reproduces the exported topic assignments (reviewer
-            # validation #12). Without this, the model retains the state of the
+            # model reproduces the exported topic assignments.
+            # Without this, the model retains the state of the
             # LAST layer processed by _evaluate_and_name_layers.
             model_dir = self.workspace / "data" / "checkpoints" / "step6_bertopic_model"
             if consensus_reached:
@@ -220,7 +220,7 @@ class Step6Worker:
             raise FileNotFoundError(f"Could not find excel file for layer {selected_layer} in {out_dir}")
 
         # Re-align the saved model to the user-selected layer so the model
-        # reproduces the exported topic assignments (reviewer validation #12).
+        # reproduces the exported topic assignments.
         assignments_path = self.workspace / "data" / "checkpoints" / "step6_layer_assignments.pkl"
         if assignments_path.exists():
             assignments = pd.read_pickle(assignments_path)
@@ -253,7 +253,7 @@ class Step6Worker:
         return {"status": "completed", "selected_layer": selected_layer}
 
     def run_verify(self):
-        """Verify mode (reviewer validation #12 — topic sizes): verify that the
+        """Verify mode: verify that the
         topic sizes reported in the exported Excel match the actual per-document
         assignments.
 

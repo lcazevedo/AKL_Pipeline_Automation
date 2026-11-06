@@ -179,7 +179,7 @@ audits:
     enabled: true
     sample_size: 100
     source: "step5_full_predictions" # all docs with P(yes), both sides of the boundary
-    filter_range:                    # reviewer validation #2: decision boundary
+    filter_range:                    # decision boundary
       column: "proba_yes"
       min: 0.40
       max: 0.60

@@ -55,8 +55,7 @@ Run the worker in finalize mode, passing the chosen layer:
 cd <workspace_root>
 ./run_worker.sh workers/step6_worker.py finalize [NUMBER]
 ```
-The finalize mode now also **re-aligns the saved model to the chosen layer**
-(reviewer validation #12): the model's topic assignments and embeddings are
+The finalize mode now also **re-aligns the saved model to the chosen layer**: the model's topic assignments and embeddings are
 updated to match the exported Excel, so the saved model is internally consistent
 with the selected layer.
 
@@ -64,7 +63,7 @@ Then proceed to the **Report result** section.
 
 ---
 
-## Verify mode (reviewer validation #12 — topic sizes)
+## Verify mode
 
 After Step 6 completes (consensus or finalize), run the verify mode to confirm
 that the topic sizes in the exported Excel match the actual per-document

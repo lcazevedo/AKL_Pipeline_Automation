@@ -248,13 +248,13 @@ class Step8Worker:
             df = self.load_data()
             md_report = self.crunch_data(df)
 
-            # Automated audits (reviewer validations #5, #9, #10, #11)
+            # Automated audits
             from step8_audits import run_all_auto_audits
             auto_audits = run_all_auto_audits(df, self.workspace)
             if auto_audits:
                 md_report += "\n---\n\n## 5. Automated Audits\n\n" + auto_audits
 
-            # Audit sample export (Phase 1.5 — reviewer validations #2, #6, #7, #8)
+            # Audit sample export (Phase 1.5)
             from audit_framework import AuditFramework
             audit_results = AuditFramework().export_all()
             exported = {k: v for k, v in audit_results.items() if "file" in v}

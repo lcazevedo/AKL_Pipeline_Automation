@@ -22,7 +22,7 @@ Use `cmd_exec` to run the worker:
 ## Phase 2: Agent Assembly & Ad-Hoc Plotting
 1. Read the expert-validated text: `data/04_reports/step8_insights_review.md`.
 2. Analyze the text to identify if the expert asked for any ad-hoc visualization. If YES, generate it via python script.
-3. Generate the validation & audit summary (reviewer-requested transparency):
+3. Generate the validation & audit summary:
    `python workers/step9_worker.py audit_summary`
    This reads the Step 6 verify report and the Step 8 audit report and writes
    `data/04_reports/step9_audit_summary.md`.

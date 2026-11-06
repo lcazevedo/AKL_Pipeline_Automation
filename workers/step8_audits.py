@@ -1,20 +1,20 @@
 """
 step8_audits.py
 ---------------
-AKL Pipeline — Step 8: Automated Audits (reviewer-requested validations)
+AKL Pipeline — Step 8: Automated Audits
 
 Implements the automated audits that run during Step 8 data crunching:
 
-- run_evoc_sensitivity()  — reviewer #5: pairwise Adjusted Rand Index between
+- run_evoc_sensitivity()  — pairwise Adjusted Rand Index between
   the EVoC layers saved during Step 6 (stability across clustering resolutions).
-- run_regression_audit()  — reviewer #9: OLS of log1p(citations) on Step-6
+- run_regression_audit()  — OLS of log1p(citations) on Step-6
   topics, centered year, and journal IF (with missingness dummy); percentile
   bootstrap confidence intervals; Kruskal-Wallis across topics; robustness
   check with/without journal IF.
-- run_growth_aicc()       — reviewer #11: formal exponential/linear/plateau
+- run_growth_aicc()       — formal exponential/linear/plateau
   model selection per macro-category using AICc (replaces the heuristic
   recent-ratio classification with a statistically grounded one).
-- run_ri_sensitivity()    — reviewer #10: Relevance Index unit-invariance.
+- run_ri_sensitivity()    — Relevance Index unit-invariance.
   Conditional: only runs when a relevance-index column is present (RI is not
   standard in AKL, so this normally reports a skip note).
 
@@ -33,7 +33,7 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 
-# ── Reviewer #5: EVoC sensitivity ────────────────────────────────────────────
+# ── EVoC sensitivity ────────────────────────────────────────────
 
 def run_evoc_sensitivity(workspace):
     """Pairwise Adjusted Rand Index between the EVoC layers saved in Step 6.
@@ -58,7 +58,7 @@ def run_evoc_sensitivity(workspace):
     n_layers = len(assignments)
     sizes = [int(len(np.unique(a))) for a in assignments]
 
-    md = ["### EVoC Sensitivity (reviewer #5)\n"]
+    md = ["### EVoC Sensitivity\n"]
     md.append(
         "Pairwise Adjusted Rand Index (ARI) between the EVoC layers computed in Step 6. "
         "ARI > 0.7 indicates stable clustering across resolutions; 0.3–0.7 moderate; "
@@ -74,7 +74,7 @@ def run_evoc_sensitivity(workspace):
     return "\n".join(md)
 
 
-# ── Reviewer #9: regression audit ────────────────────────────────────────────
+# ── regression audit ────────────────────────────────────────────
 
 def run_regression_audit(df):
     """OLS of log1p(citations) on Step-6 topics + year + journal IF.
@@ -162,7 +162,7 @@ def run_regression_audit(df):
                 for c in shared
             )
 
-    md = ["### Regression Audit (reviewer #9)\n"]
+    md = ["### Regression Audit\n"]
     md.append(
         f"OLS of log1p({cit_col}) on Step-6 topics (top 10 + Other), centered year, "
         f"and journal IF (with missingness dummy). n = {n} documents, k = {k} predictors.\n"
@@ -185,7 +185,7 @@ def run_regression_audit(df):
     return "\n".join(md)
 
 
-# ── Reviewer #11: growth model fitting with AICc ─────────────────────────────
+# ── growth model fitting with AICc ─────────────────────────────
 
 def run_growth_aicc(df):
     """Formal growth model selection per macro-category using AICc.
@@ -255,7 +255,7 @@ def run_growth_aicc(df):
         return None
 
     out = pd.DataFrame(rows).sort_values("total_mentions", ascending=False)
-    md = ["### Growth Model Fitting (reviewer #11)\n"]
+    md = ["### Growth Model Fitting\n"]
     md.append(
         "Formal model selection per macro-category: Plateau (constant), Linear, or "
         "Exponential (log-linear), chosen by minimum AICc. ΔAICc < 2 → models are "
@@ -266,10 +266,10 @@ def run_growth_aicc(df):
     return "\n".join(md)
 
 
-# ── Reviewer #10: Relevance Index sensitivity (conditional) ──────────────────
+# ── Relevance Index sensitivity (conditional) ──────────────────
 
 def run_ri_sensitivity(df):
-    """Relevance Index unit-invariance check (reviewer #10).
+    """Relevance Index unit-invariance check.
 
     Conditional: RI is not standard in AKL, so this normally reports a skip
     note. If an RI column is present, verifies that the ranking is invariant
@@ -278,14 +278,14 @@ def run_ri_sensitivity(df):
     ri_cols = [c for c in df.columns if "relevance_index" in c.lower() or c.lower() in ("ri", "relevance_idx")]
     if not ri_cols:
         return (
-            "### Relevance Index Sensitivity (reviewer #10)\n\n"
+            "### Relevance Index Sensitivity\n\n"
             "Skipped: no Relevance Index column is computed in this pipeline "
             "(RI is not standard in AKL). If RI is added later, this audit will "
             "verify the unit-invariance of the ranking.\n"
         )
 
     from scipy.stats import spearmanr
-    md = ["### Relevance Index Sensitivity (reviewer #10)\n"]
+    md = ["### Relevance Index Sensitivity\n"]
     for col in ri_cols:
         vals = pd.to_numeric(df[col], errors="coerce").dropna()
         if len(vals) < 5:

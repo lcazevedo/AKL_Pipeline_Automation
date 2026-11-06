@@ -74,8 +74,7 @@ class Step5Worker:
     @staticmethod
     def _build_text(title, abstract):
         """Single canonical text builder — used for BOTH training and corpus
-        application. Guarantees input consistency between train and deploy
-        (reviewer validation #3)."""
+        application. Guarantees input consistency between train and deploy."""
         t = title.fillna("") if hasattr(title, "fillna") else (title if title is not None else "")
         a = abstract.fillna("") if hasattr(abstract, "fillna") else (abstract if abstract is not None else "")
         return t + ".\\n" + a
@@ -228,7 +227,7 @@ You can sort the Excel files by this column to review the documents the AI strug
             # 2. Load and prep data
             df_labeled = self._load_labeled_data()
             
-            # GroupShuffleSplit (reviewer validation #1): documents from the same
+            # GroupShuffleSplit: documents from the same
             # Step-3 topic (group) never appear in both train and test, preventing
             # topic-level leakage and giving a more honest generalization estimate.
             if self.group_by_topic and "group" in df_labeled.columns:
@@ -302,7 +301,7 @@ You can sort the Excel files by this column to review the documents the AI strug
 - Decision threshold on P(yes): **{self.decision_threshold}**
 """)
             
-            # 4b. Retention check (reviewer validation #4): apply the model to ALL
+            # 4b. Retention check: apply the model to ALL
             # Step-4 labeled documents and verify it retains the expert's labels.
             retention_acc = None
             if self.retention_check:
@@ -316,7 +315,7 @@ You can sort the Excel files by this column to review the documents the AI strug
                 n_no = int((df_labeled["label"] == "no").sum())
                 with open(report_path, "a", encoding="utf-8") as f:
                     f.write(f"""
-## Retention Check (Reviewer Validation #4)
+## Retention Check
 The trained model was re-applied to all {len(df_labeled)} documents labeled by the
 specialist in Step 4 ({n_yes} relevant, {n_no} not relevant) to verify it retains the
 expert's labels.
@@ -350,7 +349,7 @@ test split or label noise; investigate before trusting the corpus filter.
             df_corpus["predicted_relevance"] = full_preds
             df_corpus["AI_Confidence"] = confidences
 
-            # Probability of the "yes" class (reviewer validation #2 prerequisite):
+            # Probability of the "yes" class:
             # needed by the Step-8 boundary audit to find documents the model is
             # unsure about. Taken directly from the classifier, independent of the threshold.
             if self.save_proba_yes:
@@ -377,8 +376,8 @@ test split or label noise; investigate before trusting the corpus filter.
             df_rel.to_excel(xlsx_rel, index=False)
             df_nrel.to_excel(xlsx_nrel, index=False)
             
-            # Full prediction table for the Step-8 boundary audit (reviewer
-            # validation #2): ALL documents with their predicted label and
+            # Full prediction table for the Step-8 boundary audit:
+            # ALL documents with their predicted label and
             # P(yes), so the audit can sample documents near the 0.5 decision
             # boundary from BOTH sides (not only the kept "yes" side).
             pkl_full = self.workspace / "data" / "02_intermediate" / "step5_full_predictions.pkl"

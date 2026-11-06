@@ -283,7 +283,7 @@ class Step9Worker:
         Reads the Step 8 audit report (classification audits) and the Step 6
         verify report (topic-size verification) and condenses them into
         `data/04_reports/step9_audit_summary.md`, which the agent includes in
-        the final report (reviewer-requested transparency).
+        the final report.
         """
         self.logger.info("Generating validation & audit summary...")
         audit_report = self.reports_dir / "step8_audit_report.md"
@@ -291,7 +291,7 @@ class Step9Worker:
 
         md = ["## Validation & Audit Summary\n"]
         md.append(
-            "This section summarizes the reviewer-requested validations performed "
+            "This section summarizes the validations performed "
             "during the pipeline run.\n"
         )
 
@@ -342,7 +342,7 @@ class Step9Worker:
         else:
             md.append("No audit report found.\n")
 
-        # Step 8 automated audits (reviewer validations #5, #9, #10, #11)
+        # Step 8 automated audits
         # Extracted from Section 5 of the data-crunching report so that EVERY
         # audit performed during the run appears in the final report.
         crunch_report = self.reports_dir / "step8_data_crunching.md"
